@@ -1,0 +1,395 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Primary user profile and core persona configuration",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 256 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 512 },
+        "activePersona": { "type": "string", "enum": ["learner", "partner", "client", "organization_admin"] },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "email", "displayName", "activePersona"]
+    },
+    "TrustPassport": {
+      "title": "Trust Passport Record",
+      "description": "Central professional history and verified achievements for a user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "headline": { "type": "string", "maxLength": 160 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "location": { "type": "string", "maxLength": 100 },
+        "locationVerificationStatus": { "type": "string", "enum": ["self_declared", "verified"] },
+        "identityVerified": { "type": "boolean" },
+        "isPublic": { "type": "boolean" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "userId", "headline", "bio", "identityVerified"]
+    },
+    "PublicTrustPassport": {
+      "title": "Public Sanitized Trust Passport",
+      "description": "Sanitized, public-facing read-only view of a user's Trust Passport credentials and earned credibility",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "headline": { "type": "string", "maxLength": 160 },
+        "bio": { "type": "string", "maxLength": 1000 },
+        "location": { "type": "string", "maxLength": 100 },
+        "locationVerificationStatus": { "type": "string", "enum": ["self_declared", "verified"] },
+        "identityVerified": { "type": "boolean" },
+        "trustScore": { "type": "number" },
+        "trustTier": { "type": "string", "maxLength": 50 },
+        "skills": { "type": "array" },
+        "projects": { "type": "array" },
+        "certificates": { "type": "array" },
+        "education": { "type": "array" },
+        "workHistory": { "type": "array" },
+        "reviews": { "type": "array" },
+        "metrics": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["userId", "displayName", "headline", "bio", "identityVerified", "trustScore", "trustTier"]
+    },
+    "Organization": {
+      "title": "Organization Profile",
+      "description": "Company, non-profit, or institution profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "website": { "type": "string", "maxLength": 256 },
+        "logoUrl": { "type": "string", "maxLength": 512 },
+        "verified": { "type": "boolean" },
+        "adminUserIds": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "description", "adminUserIds"]
+    },
+    "Opportunity": {
+      "title": "Opportunity Posting",
+      "description": "GigLink project or full-time opportunity listing",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "creatorId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "type": { "type": "string", "enum": ["gig", "contract", "apprenticeship", "bounty"] },
+        "requiredSkills": { "type": "array" },
+        "compensationType": { "type": "string", "enum": ["fixed", "hourly", "stipend", "competitive"] },
+        "compensationMin": { "type": "number" },
+        "compensationMax": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 10 },
+        "recommendedTrustTier": { "type": "string", "maxLength": 50 },
+        "screeningQuestions": { "type": "array" },
+        "status": { "type": "string", "enum": ["draft", "open", "published", "in_review", "in_progress", "awarded", "closed", "cancelled"] },
+        "proposalsCount": { "type": "number" },
+        "selectedProposalId": { "type": "string", "maxLength": 256 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "deadline": { "type": "string", "maxLength": 64 },
+        "milestones": { "type": "array" },
+        "kickoffNotes": { "type": "string", "maxLength": 2000 }
+      },
+      "required": ["id", "creatorId", "title", "description", "type", "requiredSkills", "compensationType", "currency", "status", "createdAt"]
+    },
+    "Application": {
+      "title": "Opportunity Application",
+      "description": "Application submitted by an applicant to an opportunity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 256 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "opportunityTitle": { "type": "string", "maxLength": 120 },
+        "opportunityCreatorId": { "type": "string", "maxLength": 128 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "applicantId": { "type": "string", "maxLength": 128 },
+        "applicantDisplayName": { "type": "string", "maxLength": 100 },
+        "applicantEmail": { "type": "string", "maxLength": 256 },
+        "applicantTrustTier": { "type": "string", "maxLength": 50 },
+        "applicantTrustScore": { "type": "number" },
+        "applicantIdentityVerified": { "type": "boolean" },
+        "coverNote": { "type": "string", "maxLength": 2000 },
+        "proposedRate": { "type": "number" },
+        "proposedRateType": { "type": "string", "maxLength": 50 },
+        "availabilityDate": { "type": "string", "maxLength": 64 },
+        "portfolioLinks": { "type": "array" },
+        "screeningAnswers": { "type": "object" },
+        "status": { "type": "string", "enum": ["submitted", "under_review", "shortlisted", "accepted", "declined", "withdrawn"] },
+        "creatorFeedback": { "type": "string", "maxLength": 1000 },
+        "submittedAt": { "type": "string", "maxLength": 64 },
+        "reviewedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "opportunityId", "opportunityTitle", "opportunityCreatorId", "applicantId", "applicantDisplayName", "applicantEmail", "coverNote", "status", "submittedAt"]
+    },
+    "Proposal": {
+      "title": "Opportunity Proposal",
+      "description": "Structured proposal submitted by talent with milestone breakdown, pricing, and timeline",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 256 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "opportunityTitle": { "type": "string", "maxLength": 120 },
+        "creatorId": { "type": "string", "maxLength": 128 },
+        "talentId": { "type": "string", "maxLength": 128 },
+        "talentDisplayName": { "type": "string", "maxLength": 100 },
+        "talentEmail": { "type": "string", "maxLength": 256 },
+        "talentTrustScore": { "type": "number" },
+        "talentTrustTier": { "type": "string", "maxLength": 50 },
+        "talentVolumeTier": { "type": "string", "maxLength": 50 },
+        "talentIdentityVerified": { "type": "boolean" },
+        "coverLetter": { "type": "string", "maxLength": 5000 },
+        "proposedTotalUSD": { "type": "number" },
+        "proposedDeliveryDays": { "type": "number" },
+        "proposedMilestones": { "type": "array" },
+        "status": { "type": "string", "enum": ["submitted", "under_review", "shortlisted", "revision_requested", "rejected", "accepted", "withdrawn"] },
+        "clientFeedback": { "type": "string", "maxLength": 1000 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "opportunityId", "creatorId", "talentId", "talentDisplayName", "coverLetter", "proposedTotalUSD", "proposedDeliveryDays", "proposedMilestones", "status", "createdAt"]
+    },
+    "Verification": {
+      "title": "Verification Record",
+      "description": "Official verification audit record for skill, project, or identity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["skill", "project", "certificate", "identity", "education", "work_history"] },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "verifierId": { "type": "string", "maxLength": 128 },
+        "verifierType": { "type": "string", "enum": ["organization", "peer", "platform", "institution"] },
+        "status": { "type": "string", "enum": ["unverified", "pending", "verified", "rejected"] },
+        "evidence": { "type": "string", "maxLength": 2000 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "verifiedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "userId", "type", "targetId", "status", "createdAt"]
+    },
+    "Contract": {
+      "title": "GigLink Contract",
+      "description": "Legally binding scope-locked agreement and execution state between client and talent",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "opportunityTitle": { "type": "string", "maxLength": 120 },
+        "applicationId": { "type": "string", "maxLength": 256 },
+        "proposalId": { "type": "string", "maxLength": 256 },
+        "creatorId": { "type": "string", "maxLength": 128 },
+        "creatorName": { "type": "string", "maxLength": 100 },
+        "talentId": { "type": "string", "maxLength": 128 },
+        "talentName": { "type": "string", "maxLength": 100 },
+        "organizationId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["draft", "pending_acceptance", "active", "completed", "cancelled", "disputed"] },
+        "version": { "type": "number" },
+        "scopeLock": { "type": "object" },
+        "originalScope": { "type": "object" },
+        "milestones": { "type": "array" },
+        "changeRequests": { "type": "array" },
+        "amendmentHistory": { "type": "array" },
+        "creatorAcceptance": { "type": "object" },
+        "talentAcceptance": { "type": "object" },
+        "conversationId": { "type": "string", "maxLength": 128 },
+        "finalHandover": { "type": "object" },
+        "activatedAt": { "type": "string", "maxLength": 64 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "opportunityId", "creatorId", "talentId", "status", "scopeLock", "milestones", "creatorAcceptance", "talentAcceptance"]
+    },
+    "FinancialLedger": {
+      "title": "Financial Ledger Record",
+      "description": "Immutable, append-oriented financial transaction record for milestone escrow, releases, and platform fees",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "milestoneId": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "payerId": { "type": "string", "maxLength": 128 },
+        "payerName": { "type": "string", "maxLength": 100 },
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "recipientName": { "type": "string", "maxLength": 100 },
+        "amount": { "type": "number" },
+        "currency": { "type": "string", "maxLength": 10 },
+        "platformFeeRate": { "type": "number" },
+        "platformFeeAmount": { "type": "number" },
+        "netTalentAmount": { "type": "number" },
+        "type": { "type": "string", "enum": ["milestone_funded", "escrow_held", "milestone_released", "payout_initiated", "payout_completed", "refund_initiated", "refund_completed", "platform_fee"] },
+        "provider": { "type": "string", "enum": ["stripe", "simulated_stripe"] },
+        "providerReference": { "type": "string", "maxLength": 256 },
+        "providerEventId": { "type": "string", "maxLength": 256 },
+        "status": { "type": "string", "enum": ["pending", "processing", "succeeded", "failed", "cancelled"] },
+        "description": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "completedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "contractId", "payerId", "recipientId", "amount", "currency", "type", "status", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Project Conversation",
+      "description": "Project-linked communication channel between authorized contract client and talent",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "opportunityId": { "type": "string", "maxLength": 128 },
+        "applicationId": { "type": "string", "maxLength": 256 },
+        "creatorId": { "type": "string", "maxLength": 128 },
+        "creatorName": { "type": "string", "maxLength": 100 },
+        "talentId": { "type": "string", "maxLength": 128 },
+        "talentName": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["pending_initiation", "active", "archived"] },
+        "contractStatus": { "type": "string", "maxLength": 50 },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "lastMessageAt": { "type": "string", "maxLength": 64 },
+        "lastMessagePreview": { "type": "string", "maxLength": 250 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 128 },
+        "lastMessageSenderRole": { "type": "string", "maxLength": 50 },
+        "unreadCountCreator": { "type": "number" },
+        "unreadCountTalent": { "type": "number" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "contractId", "creatorId", "talentId", "status", "createdBy", "createdAt"]
+    },
+    "Message": {
+      "title": "Project Message",
+      "description": "Immutable project-aware message with optional milestone or revision context",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "conversationId": { "type": "string", "maxLength": 128 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderRole": { "type": "string", "enum": ["creator", "talent", "admin"] },
+        "senderName": { "type": "string", "maxLength": 100 },
+        "body": { "type": "string", "maxLength": 4000 },
+        "contextType": { "type": "string", "enum": ["general", "milestone", "deliverable", "revision", "change_request", "final_handover"] },
+        "milestoneId": { "type": "string", "maxLength": 128 },
+        "milestoneTitle": { "type": "string", "maxLength": 120 },
+        "changeRequestId": { "type": "string", "maxLength": 128 },
+        "attachments": { "type": "array" },
+        "readBy": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "conversationId", "senderId", "senderRole", "body", "createdAt"]
+    },
+    "ProjectProof": {
+      "title": "Public Project Proof",
+      "description": "Sanitized cryptographic proof of work completed on GigLink",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "projectTitle": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 100 },
+        "creatorPublicHandle": { "type": "string", "maxLength": 100 },
+        "talentPublicHandle": { "type": "string", "maxLength": 100 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "deliverablesSummary": { "type": "array" },
+        "skillsDemonstrated": { "type": "array" },
+        "volumeTier": { "type": "string", "enum": ["none", "tier_verified", "tier_established", "tier_high_value", "tier_enterprise"] },
+        "verificationHash": { "type": "string", "maxLength": 64 },
+        "verifiedByPlatform": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "projectTitle", "category", "creatorPublicHandle", "talentPublicHandle", "completedAt", "volumeTier", "verificationHash", "verifiedByPlatform", "createdAt"]
+    },
+    "Feedback": {
+      "title": "Contract Feedback",
+      "description": "Peer feedback and ratings recorded upon contract completion",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "contractId": { "type": "string", "maxLength": 128 },
+        "authorId": { "type": "string", "maxLength": 128 },
+        "authorRole": { "type": "string", "enum": ["creator", "talent"] },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "ratingOverall": { "type": "number" },
+        "ratingCommunication": { "type": "number" },
+        "ratingQuality": { "type": "number" },
+        "ratingTimeliness": { "type": "number" },
+        "comment": { "type": "string", "maxLength": 1000 },
+        "isPublic": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "contractId", "authorId", "authorRole", "targetUserId", "ratingOverall", "ratingCommunication", "ratingQuality", "ratingTimeliness", "comment", "isPublic", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Individual user accounts and active persona settings (Owner-only access)"
+    },
+    "/trustPassports/{passportId}": {
+      "schema": { "$ref": "#/entities/TrustPassport" },
+      "description": "Central Trust Passport records for professional history (Owner & Admin private access only)"
+    },
+    "/publicTrustPassports/{passportId}": {
+      "schema": { "$ref": "#/entities/PublicTrustPassport" },
+      "description": "Sanitized, public-facing read-only view of a user's verified Trust Passport credentials"
+    },
+    "/organizations/{orgId}": {
+      "schema": { "$ref": "#/entities/Organization" },
+      "description": "Company and Institution profiles"
+    },
+    "/opportunities/{oppId}": {
+      "schema": { "$ref": "#/entities/Opportunity" },
+      "description": "Opportunity listings created by clients and organizations"
+    },
+    "/applications/{appId}": {
+      "schema": { "$ref": "#/entities/Application" },
+      "description": "Applications submitted to opportunities"
+    },
+    "/proposals/{proposalId}": {
+      "schema": { "$ref": "#/entities/Proposal" },
+      "description": "Confidential proposals with milestone details submitted to opportunities (Talent, Creator, Org Admin, Admin only)"
+    },
+    "/verifications/{verifId}": {
+      "schema": { "$ref": "#/entities/Verification" },
+      "description": "Verification requests and audit records"
+    },
+    "/contracts/{contractId}": {
+      "schema": { "$ref": "#/entities/Contract" },
+      "description": "GigLink contracts and project execution state between client and talent"
+    },
+    "/financialLedger/{recordId}": {
+      "schema": { "$ref": "#/entities/FinancialLedger" },
+      "description": "Immutable financial ledger records (Read-only for contract parties and admins; server-authoritative creation)"
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Project conversations linked to contracts (Participants and admins only; Client-first initiation)"
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Project-aware immutable messages under conversations"
+    },
+    "/projectProofs/{proofId}": {
+      "schema": { "$ref": "#/entities/ProjectProof" },
+      "description": "Public verified project proofs"
+    },
+    "/feedback/{feedbackId}": {
+      "schema": { "$ref": "#/entities/Feedback" },
+      "description": "Verified feedback and ratings for completed contracts"
+    }
+  }
+}

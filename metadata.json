@@ -1,0 +1,6 @@
+{
+  "name": "GigLink",
+  "description": "A professional career ecosystem connecting Learners, Partners, Clients, and Organizations with a verified Trust Passport.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

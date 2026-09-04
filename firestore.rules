@@ -1,0 +1,882 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Role-based Access via Custom Claims (No hardcoded emails)
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.admin == true
+      );
+    }
+
+    function isVerifier() {
+      return isSignedIn() && (
+        request.auth.token.role == 'verifier' ||
+        request.auth.token.verifier == true ||
+        isAdmin()
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Schemas & Structural Validators ---
+    function isValidUser(data) {
+      return data.uid is string && data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 256 &&
+             data.displayName is string && data.displayName.size() <= 100 &&
+             data.activePersona is string &&
+             (data.activePersona == 'learner' || data.activePersona == 'partner' ||
+              data.activePersona == 'client' || data.activePersona == 'organization_admin');
+    }
+
+    function isValidPassport(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.headline is string && data.headline.size() <= 160 &&
+             data.bio is string && data.bio.size() <= 1000 &&
+             data.identityVerified is bool;
+    }
+
+    function isValidPublicPassport(data) {
+      return data.userId is string &&
+             data.displayName is string && data.displayName.size() <= 100 &&
+             data.headline is string && data.headline.size() <= 160 &&
+             data.trustScore is number && data.trustScore >= 0 && data.trustScore <= 100 &&
+             data.trustTier is string &&
+             data.identityVerified is bool;
+    }
+
+    function isValidVerification(data) {
+      return data.userId is string &&
+             data.status is string &&
+             (data.status == 'pending' || data.status == 'verified' || data.status == 'rejected') &&
+             data.documentType is string &&
+             data.maskedNumber is string && data.maskedNumber.size() <= 64;
+    }
+
+    function isValidOrganization(data) {
+      return data.name is string && data.name.size() <= 120 &&
+             data.type is string &&
+             data.description is string && data.description.size() <= 1000 &&
+             data.adminUserIds is list &&
+             data.memberUserIds is list;
+    }
+
+    function isValidOpportunity(data) {
+      return data.title is string && data.title.size() <= 120 &&
+             data.creatorId is string &&
+             data.type is string &&
+             (data.type == 'gig' || data.type == 'contract' || data.type == 'apprenticeship' || data.type == 'bounty') &&
+             data.category is string && data.category.size() <= 64 &&
+             data.description is string && data.description.size() <= 4000 &&
+             data.status is string &&
+             (data.status == 'draft' || data.status == 'open' || data.status == 'published' || data.status == 'in_review' || data.status == 'in_progress' || data.status == 'awarded' || data.status == 'closed' || data.status == 'cancelled') &&
+             data.requiredSkills is list && data.requiredSkills.size() <= 15 &&
+             data.locationType is string &&
+             (data.locationType == 'remote' || data.locationType == 'hybrid' || data.locationType == 'onsite') &&
+             data.compensationType is string &&
+             (data.compensationType == 'fixed' || data.compensationType == 'hourly' || data.compensationType == 'stipend' || data.compensationType == 'competitive') &&
+             data.currency is string && data.currency.size() <= 8 &&
+             data.createdAt is string &&
+             data.updatedAt is string;
+    }
+
+    function isValidProposal(data) {
+      return data.opportunityId is string &&
+             data.creatorId is string &&
+             data.talentId is string && data.talentId == request.auth.uid &&
+             data.talentDisplayName is string && data.talentDisplayName.size() <= 100 &&
+             data.talentEmail is string && data.talentEmail.size() <= 256 &&
+             data.talentTrustScore is number && data.talentTrustScore >= 0 && data.talentTrustScore <= 100 &&
+             data.talentTrustTier is string &&
+             data.talentIdentityVerified is bool &&
+             data.coverLetter is string && data.coverLetter.size() >= 10 && data.coverLetter.size() <= 5000 &&
+             data.proposedTotalUSD is number && data.proposedTotalUSD > 0 &&
+             data.proposedDeliveryDays is int && data.proposedDeliveryDays > 0 && data.proposedDeliveryDays <= 3650 &&
+             data.proposedMilestones is list && data.proposedMilestones.size() >= 1 && data.proposedMilestones.size() <= 10 &&
+             data.status is string &&
+             (data.status == 'submitted' || data.status == 'under_review' || data.status == 'shortlisted' || data.status == 'revision_requested' || data.status == 'rejected' || data.status == 'accepted' || data.status == 'withdrawn') &&
+             data.createdAt is string &&
+             data.updatedAt is string;
+    }
+
+    function isValidApplication(data) {
+      return data.opportunityId is string &&
+             data.opportunityCreatorId is string &&
+             data.applicantId is string && data.applicantId == request.auth.uid &&
+             data.applicantDisplayName is string && data.applicantDisplayName.size() <= 100 &&
+             data.applicantEmail is string && data.applicantEmail.size() <= 256 &&
+             data.coverNote is string && data.coverNote.size() <= 2000 &&
+             data.status is string &&
+             (data.status == 'submitted' || data.status == 'under_review' || data.status == 'shortlisted' || data.status == 'accepted' || data.status == 'declined' || data.status == 'withdrawn') &&
+             data.submittedAt is string &&
+             data.updatedAt is string;
+    }
+
+    function isOrgAdmin(orgId) {
+      return orgId != null &&
+             orgId != '' &&
+             request.auth.uid in get(/databases/$(database)/documents/organizations/$(orgId)).data.adminUserIds;
+    }
+
+    function isOpportunityManager(data) {
+      return isSignedIn() && (
+        data.creatorId == request.auth.uid ||
+        ('organizationId' in data && data.organizationId != null && isOrgAdmin(data.organizationId)) ||
+        isAdmin()
+      );
+    }
+
+    function isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, idx) {
+      return idx < existingMilestones.size() &&
+             idx < incomingMilestones.size() &&
+             (('disputeStatus' in existingMilestones[idx]) && existingMilestones[idx].disputeStatus == 'disputed') &&
+             (
+               existingMilestones[idx].id != incomingMilestones[idx].id ||
+               incomingMilestones[idx].paymentState != existingMilestones[idx].paymentState ||
+               (!('disputeStatus' in incomingMilestones[idx])) ||
+               incomingMilestones[idx].disputeStatus != 'disputed'
+             );
+    }
+
+    function isNoDisputedMilestoneTampered(existingMilestones, incomingMilestones) {
+      return (existingMilestones.size() == 0 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 0)) &&
+             (existingMilestones.size() <= 1 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 1)) &&
+             (existingMilestones.size() <= 2 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 2)) &&
+             (existingMilestones.size() <= 3 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 3)) &&
+             (existingMilestones.size() <= 4 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 4)) &&
+             (existingMilestones.size() <= 5 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 5)) &&
+             (existingMilestones.size() <= 6 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 6)) &&
+             (existingMilestones.size() <= 7 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 7)) &&
+             (existingMilestones.size() <= 8 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 8)) &&
+             (existingMilestones.size() <= 9 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 9));
+    }
+
+    function isValidContract(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.opportunityId is string &&
+             data.applicationId is string &&
+             data.creatorId is string &&
+             data.talentId is string &&
+             data.status is string &&
+             (data.status == 'draft' || data.status == 'pending_acceptance' || data.status == 'active' || data.status == 'completed' || data.status == 'cancelled' || data.status == 'disputed') &&
+             data.scopeLock is map &&
+             data.milestones is list && data.milestones.size() <= 10 &&
+             data.creatorAcceptance is map &&
+             data.talentAcceptance is map &&
+             data.createdAt is string &&
+             data.updatedAt is string &&
+             (!('version' in data) || data.version is int) &&
+             (!('changeRequests' in data) || data.changeRequests is list) &&
+             (!('amendmentHistory' in data) || data.amendmentHistory is list) &&
+             (!('disputes' in data) || data.disputes is list) &&
+             (!('cancellationProposals' in data) || data.cancellationProposals is list);
+    }
+
+    function isValidLedgerRecord(data) {
+      return data.id is string &&
+             data.contractId is string &&
+             (!('milestoneId' in data) || data.milestoneId == null || data.milestoneId is string) &&
+             data.payerId is string &&
+             data.recipientId is string &&
+             data.amount is number && data.amount > 0 &&
+             data.type is string &&
+             (data.type == 'milestone_funded' || data.type == 'milestone_released' || data.type == 'payout_completed' || data.type == 'refund_completed' || data.type == 'platform_fee') &&
+             data.status is string &&
+             data.createdAt is string;
+    }
+
+    function isValidConversation(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.contractId is string && data.contractId.size() <= 128 &&
+             data.creatorId is string && data.creatorId.size() <= 128 &&
+             data.talentId is string && data.talentId.size() <= 128 &&
+             data.status is string && (data.status == 'pending_initiation' || data.status == 'active' || data.status == 'archived') &&
+             data.createdBy is string && data.createdBy.size() <= 128 &&
+             data.createdAt is string;
+    }
+
+    function isValidProjectProof(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.projectTitle is string && data.projectTitle.size() <= 200 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.creatorPublicHandle is string && data.creatorPublicHandle.size() <= 100 &&
+             data.talentPublicHandle is string && data.talentPublicHandle.size() <= 100 &&
+             data.completedAt is string &&
+             data.deliverablesSummary is list &&
+             data.skillsDemonstrated is list &&
+             data.volumeTier is string && (data.volumeTier == 'none' || data.volumeTier == 'tier_verified' || data.volumeTier == 'tier_established' || data.volumeTier == 'tier_high_value' || data.volumeTier == 'tier_enterprise') &&
+             data.verificationHash is string && data.verificationHash.size() == 64 &&
+             data.verifiedByPlatform == true &&
+             data.createdAt is string;
+    }
+
+    function isValidFeedback(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.contractId is string && data.contractId.size() <= 128 &&
+             data.authorId is string && data.authorId.size() <= 128 &&
+             data.authorRole is string && (data.authorRole == 'creator' || data.authorRole == 'talent') &&
+             data.targetUserId is string && data.targetUserId.size() <= 128 &&
+             data.ratingOverall is number && data.ratingOverall >= 1 && data.ratingOverall <= 5 &&
+             data.ratingCommunication is number && data.ratingCommunication >= 1 && data.ratingCommunication <= 5 &&
+             data.ratingQuality is number && data.ratingQuality >= 1 && data.ratingQuality <= 5 &&
+             data.ratingTimeliness is number && data.ratingTimeliness >= 1 && data.ratingTimeliness <= 5 &&
+             data.comment is string && data.comment.size() >= 5 && data.comment.size() <= 1000 &&
+             data.isPublic is bool &&
+             data.createdAt is string;
+    }
+    function isValidMessage(data) {
+      return data.id is string && data.id.size() <= 128 &&
+             data.conversationId is string && data.conversationId.size() <= 128 &&
+             data.senderId is string && data.senderId.size() <= 128 &&
+             data.senderRole is string && (data.senderRole == 'creator' || data.senderRole == 'talent' || data.senderRole == 'admin') &&
+             data.body is string && data.body.size() >= 1 && data.body.size() <= 4000 &&
+             data.createdAt is string;
+    }
+
+    function isContractParty(data) {
+      return isSignedIn() && (
+        data.creatorId == request.auth.uid ||
+        data.talentId == request.auth.uid ||
+        ('organizationId' in data && data.organizationId != null && isOrgAdmin(data.organizationId)) ||
+        isAdmin()
+      );
+    }
+
+    // ==========================================
+    // 1. Users Collection (Private Account Information)
+    // ==========================================
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isVerifier() || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) &&
+                       incoming().uid == existing().uid;
+    }
+
+    // ==========================================
+    // 2. Private Trust Passports (Owner & Admin Access Only)
+    // ==========================================
+    match /trustPassports/{passportId} {
+      allow get: if isOwner(passportId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(passportId) && isValidId(passportId) && isValidPassport(incoming()) &&
+                       incoming().identityVerified == false;
+      allow update: if isValidId(passportId) && (
+        // Admin / Trusted backend process can update identityVerified & calculated metrics
+        (isAdmin() && incoming().userId == existing().userId) ||
+        // Owner can update user-controlled fields, but CANNOT mutate identityVerified
+        (isOwner(passportId) && isValidPassport(incoming()) &&
+         incoming().userId == existing().userId &&
+         incoming().identityVerified == existing().identityVerified)
+      );
+    }
+
+    // ==========================================
+    // 3. Sanitized Public Trust Passports (Public Read-Only Projection)
+    // ==========================================
+    match /publicTrustPassports/{passportId} {
+      // Individual passport resolution ONLY (no directory listing / scraping)
+      allow get: if true;
+      allow list: if false;
+
+      // Creation by owner: Authoritative fields must initialize unverified/0 unless set by admin
+      allow create: if isOwner(passportId) && isValidId(passportId) && isValidPublicPassport(incoming()) && (
+        (incoming().userId == request.auth.uid &&
+         incoming().trustScore == 0 &&
+         incoming().trustTier == 'Unverified' &&
+         incoming().identityVerified == false) ||
+        isAdmin()
+      );
+
+      // Updates by owner: CANNOT mutate authoritative score/verification fields
+      allow update: if isValidId(passportId) && (
+        isAdmin() ||
+        (isOwner(passportId) && isValidPublicPassport(incoming()) &&
+         incoming().userId == existing().userId &&
+         incoming().trustScore == existing().trustScore &&
+         incoming().trustTier == existing().trustTier &&
+         incoming().identityVerified == existing().identityVerified)
+      );
+
+      // Owner can take passport down from public view (delete projection)
+      allow delete: if isOwner(passportId) || isAdmin();
+    }
+
+    // ==========================================
+    // 4. Verifications Collection (Strict State Machine)
+    // ==========================================
+    match /verifications/{verifId} {
+      // Only the applicant, assigned verifier, or admin can read the verification request
+      allow get, list: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.verifierUid == request.auth.uid ||
+        isVerifier() ||
+        isAdmin()
+      );
+
+      // Applicant submits verification:
+      // Status MUST be 'pending', verifierUid, reviewedAt, and rejectionReason MUST NOT be set
+      allow create: if isSignedIn() && isValidId(verifId) && isValidVerification(incoming()) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().status == 'pending' &&
+                       (!('verifierUid' in incoming()) || incoming().verifierUid == null) &&
+                       (!('reviewedAt' in incoming()) || incoming().reviewedAt == null) &&
+                       (!('rejectionReason' in incoming()) || incoming().rejectionReason == null);
+
+      // Updates: Applicant vs. Authorized Verifier paths
+      allow update: if isSignedIn() && isValidId(verifId) && (
+        // Verifier Path: MUST have verifier/admin claim, CANNOT be the subject, sets status to verified/rejected
+        (isVerifier() && request.auth.uid != existing().userId &&
+         (incoming().status == 'verified' || incoming().status == 'rejected') &&
+         incoming().verifierUid == request.auth.uid &&
+         incoming().userId == existing().userId &&
+         incoming().submittedAt == existing().submittedAt)
+        ||
+        // Applicant Path: Cannot change status, verifierUid, reviewedAt, or rejectionReason
+        (existing().userId == request.auth.uid &&
+         incoming().userId == existing().userId &&
+         incoming().status == existing().status &&
+         incoming().verifierUid == existing().verifierUid &&
+         incoming().reviewedAt == existing().reviewedAt &&
+         incoming().rejectionReason == existing().rejectionReason &&
+         incoming().submittedAt == existing().submittedAt)
+      );
+    }
+
+    // ==========================================
+    // 5. Organizations Collection
+    // ==========================================
+    match /organizations/{orgId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(orgId) && isValidOrganization(incoming()) &&
+                       (request.auth.uid in incoming().adminUserIds || isAdmin());
+      allow update: if isSignedIn() && isValidId(orgId) && isValidOrganization(incoming()) &&
+                       (request.auth.uid in existing().adminUserIds || isAdmin());
+      allow delete: if isSignedIn() && isValidId(orgId) &&
+                       (request.auth.uid in existing().adminUserIds || isAdmin());
+    }
+
+    // ==========================================
+    // 6. Opportunities Collection (Audited Group 4)
+    // ==========================================
+    match /opportunities/{oppId} {
+      // Public can get open opportunities; managers/admins can get any state (draft/closed/in_progress)
+      allow get: if resource.data.status == 'open' || isOpportunityManager(resource.data);
+      
+      // Listing: Public can list open opportunities; creators can list their own; admins can list
+      allow list: if resource.data.status == 'open' || 
+                     (isSignedIn() && (resource.data.creatorId == request.auth.uid || isAdmin()));
+
+      // Create: Must be signed in, valid ID, creatorId == auth.uid, and if organizationId is present, must be org admin
+      allow create: if isSignedIn() && isValidId(oppId) &&
+                       incoming().creatorId == request.auth.uid &&
+                       (!('organizationId' in incoming()) || incoming().organizationId == null || isOrgAdmin(incoming().organizationId) || isAdmin()) &&
+                       isValidOpportunity(incoming());
+
+      // Update: Manager can update details and lifecycle status; creatorId and createdAt remain immutable
+      allow update: if isValidId(oppId) &&
+                       isOpportunityManager(existing()) &&
+                       isValidOpportunity(incoming()) &&
+                       incoming().creatorId == existing().creatorId &&
+                       incoming().createdAt == existing().createdAt;
+
+      // Delete: Creator or Admin only
+      allow delete: if isSignedIn() && isValidId(oppId) &&
+                       (existing().creatorId == request.auth.uid || isAdmin());
+    }
+
+    // ==========================================
+    // 7. Applications Collection (Audited Group 4)
+    // ==========================================
+    match /applications/{appId} {
+      function isOppManagerForApp(oppCreatorId, orgId) {
+        return isSignedIn() && (
+          oppCreatorId == request.auth.uid ||
+          (orgId != null && orgId != '' && isOrgAdmin(orgId)) ||
+          isAdmin()
+        );
+      }
+
+      // Read: Single document retrieval
+      allow get: if isSignedIn() && (
+        resource.data.applicantId == request.auth.uid ||
+        isOppManagerForApp(resource.data.opportunityCreatorId, 
+          'organizationId' in resource.data ? resource.data.organizationId : null)
+      );
+
+      // List queries: Applicant, creator, or admin without dynamic get() lookups
+      allow list: if isSignedIn() && (
+        resource.data.applicantId == request.auth.uid ||
+        resource.data.opportunityCreatorId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: Enforce deterministic ID, applicant is auth.uid, status is 'submitted', no creator review fields, and target opportunity is currently 'open'
+      allow create: if isSignedIn() && 
+                       appId == incoming().opportunityId + '_' + request.auth.uid &&
+                       incoming().applicantId == request.auth.uid &&
+                       incoming().status == 'submitted' &&
+                       (!('creatorFeedback' in incoming()) || incoming().creatorFeedback == null) &&
+                       (!('reviewedAt' in incoming()) || incoming().reviewedAt == null) &&
+                       get(/databases/$(database)/documents/opportunities/$(incoming().opportunityId)).data.status == 'open' &&
+                       isValidApplication(incoming());
+
+      // Updates: Strict separation of Applicant vs. Manager paths with full state-machine validation
+      allow update: if isSignedIn() && isValidId(appId) && (
+        // 1. Applicant Path: Can ONLY withdraw from 'submitted' OR update cover note while in 'submitted'
+        (existing().applicantId == request.auth.uid &&
+         incoming().applicantId == existing().applicantId &&
+         incoming().opportunityId == existing().opportunityId &&
+         incoming().opportunityCreatorId == existing().opportunityCreatorId &&
+         incoming().submittedAt == existing().submittedAt &&
+         (!('creatorFeedback' in incoming()) || incoming().creatorFeedback == existing().creatorFeedback) &&
+         (!('reviewedAt' in incoming()) || incoming().reviewedAt == existing().reviewedAt) &&
+         existing().status == 'submitted' &&
+         (incoming().status == 'withdrawn' || incoming().status == 'submitted') &&
+         isValidApplication(incoming()))
+        ||
+        // 2. Manager Path: Legitimate review state machine transitions
+        (isOppManagerForApp(existing().opportunityCreatorId, 
+           'organizationId' in existing() ? existing().organizationId : null) &&
+         incoming().applicantId == existing().applicantId &&
+         incoming().opportunityId == existing().opportunityId &&
+         incoming().opportunityCreatorId == existing().opportunityCreatorId &&
+         incoming().coverNote == existing().coverNote &&
+         incoming().submittedAt == existing().submittedAt &&
+         (
+           // submitted -> under_review
+           (existing().status == 'submitted' && incoming().status == 'under_review') ||
+           // under_review -> shortlisted or declined
+           (existing().status == 'under_review' && (incoming().status == 'shortlisted' || incoming().status == 'declined')) ||
+           // shortlisted -> accepted or declined
+           (existing().status == 'shortlisted' && (incoming().status == 'accepted' || incoming().status == 'declined'))
+         ))
+      );
+
+      // Delete: Platform Admin only
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 8. Proposals Collection (Phase 8 Proposal Engine)
+    // ==========================================
+    match /proposals/{proposalId} {
+      function isOppManagerForProposal(oppCreatorId, orgId) {
+        return isSignedIn() && (
+          oppCreatorId == request.auth.uid ||
+          (orgId != null && orgId != '' && isOrgAdmin(orgId)) ||
+          isAdmin()
+        );
+      }
+
+      // Read: Strictly confidential to submitting talent, opportunity creator, org admin, or platform admin
+      allow get: if isSignedIn() && (
+        resource.data.talentId == request.auth.uid ||
+        isOppManagerForProposal(resource.data.creatorId,
+          'organizationId' in resource.data ? resource.data.organizationId : null)
+      );
+
+      // List: Only talent querying own proposals, creator querying proposals for their opportunity, or admin
+      allow list: if isSignedIn() && (
+        resource.data.talentId == request.auth.uid ||
+        resource.data.creatorId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: Enforce deterministic ID, talent is auth.uid, creator cannot propose to own opp, status is 'submitted'
+      allow create: if isSignedIn() &&
+                       proposalId == 'prop_' + incoming().opportunityId + '_' + request.auth.uid &&
+                       incoming().talentId == request.auth.uid &&
+                       incoming().creatorId != request.auth.uid &&
+                       incoming().status == 'submitted' &&
+                       (!('clientFeedback' in incoming()) || incoming().clientFeedback == null) &&
+                       (!('contractId' in incoming()) || incoming().contractId == null) &&
+                       isValidProposal(incoming());
+
+      // Update: Strict separation between Talent withdrawal/update and Manager review/acceptance
+      allow update: if isSignedIn() && isValidId(proposalId) && (
+        // 1. Talent Path: Can withdraw or edit while in 'submitted', BUT cannot edit if 'accepted'
+        (existing().talentId == request.auth.uid &&
+         incoming().talentId == existing().talentId &&
+         incoming().opportunityId == existing().opportunityId &&
+         incoming().creatorId == existing().creatorId &&
+         incoming().createdAt == existing().createdAt &&
+         existing().status != 'accepted' &&
+         (
+           (existing().status == 'submitted' && (incoming().status == 'submitted' || incoming().status == 'withdrawn') && isValidProposal(incoming())) ||
+           ((existing().status == 'under_review' || existing().status == 'shortlisted') && incoming().status == 'withdrawn')
+         ))
+        ||
+        // 2. Manager Path: Review state transitions; cannot mutate talent price, milestones, or cover letter
+        (isOppManagerForProposal(existing().creatorId,
+           'organizationId' in existing() ? existing().organizationId : null) &&
+         incoming().talentId == existing().talentId &&
+         incoming().opportunityId == existing().opportunityId &&
+         incoming().creatorId == existing().creatorId &&
+         incoming().coverLetter == existing().coverLetter &&
+         incoming().proposedTotalUSD == existing().proposedTotalUSD &&
+         incoming().proposedMilestones == existing().proposedMilestones &&
+         incoming().createdAt == existing().createdAt &&
+         (
+           // submitted -> under_review, shortlisted, rejected, revision_requested
+           (existing().status == 'submitted' && (incoming().status == 'under_review' || incoming().status == 'shortlisted' || incoming().status == 'rejected' || incoming().status == 'revision_requested')) ||
+           // under_review -> shortlisted, rejected, revision_requested, accepted
+           (existing().status == 'under_review' && (incoming().status == 'shortlisted' || incoming().status == 'rejected' || incoming().status == 'revision_requested' || incoming().status == 'accepted')) ||
+           // shortlisted -> accepted, rejected, revision_requested
+           (existing().status == 'shortlisted' && (incoming().status == 'accepted' || incoming().status == 'rejected' || incoming().status == 'revision_requested'))
+         ))
+      );
+
+      // Delete: Platform Admin or Talent if status == 'submitted'
+      allow delete: if isAdmin() || (isSignedIn() && existing().talentId == request.auth.uid && existing().status == 'submitted');
+    }
+
+    // ==========================================
+    // 9. Contracts Collection (Dual-Party Project & Milestone Execution)
+    // ==========================================
+    match /contracts/{contractId} {
+      // Read: Single document lookup
+      allow get: if isContractParty(resource.data);
+
+      // List queries: Creator, Talent, or Admin
+      allow list: if isSignedIn() && (
+        resource.data.creatorId == request.auth.uid ||
+        resource.data.talentId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: Authorized creator, talent, org admin, or platform admin with valid structure
+      allow create: if isSignedIn() &&
+                       isValidId(contractId) &&
+                       isValidContract(incoming()) &&
+                       (
+                         incoming().creatorId == request.auth.uid ||
+                         incoming().talentId == request.auth.uid ||
+                         ('organizationId' in incoming() && incoming().organizationId != null && incoming().organizationId != '' && isOrgAdmin(incoming().organizationId)) ||
+                         isAdmin()
+                       );
+
+      // Update: Authorized party only with immutable core linkages, version monotonicity, structural validity, and milestone integrity
+      allow update: if isSignedIn() &&
+                       isValidId(contractId) &&
+                       isValidContract(incoming()) &&
+                       isContractParty(existing()) &&
+                       incoming().id == existing().id &&
+                       incoming().opportunityId == existing().opportunityId &&
+                       incoming().applicationId == existing().applicationId &&
+                       incoming().creatorId == existing().creatorId &&
+                       incoming().talentId == existing().talentId &&
+                       incoming().createdAt == existing().createdAt &&
+                       // Completed or Cancelled contracts are strictly immutable (unless platform admin)
+                       ((existing().status != 'completed' && existing().status != 'cancelled') || isAdmin()) &&
+                       // Version numbers must be monotonically non-decreasing
+                       (!('version' in existing()) || !('version' in incoming()) || incoming().version >= existing().version) &&
+                       // originalScope is permanently immutable once established
+                       (!('originalScope' in existing()) || !('originalScope' in incoming()) || incoming().originalScope == existing().originalScope) &&
+                       // amendmentHistory cannot be truncated or shrunk
+                       (!('amendmentHistory' in existing()) || !('amendmentHistory' in incoming()) || incoming().amendmentHistory.size() >= existing().amendmentHistory.size()) &&
+                       // Milestones integrity: direct client update cannot delete milestones from an active contract or downgrade approved review states
+                       (isAdmin() || existing().status != 'active' || incoming().milestones.size() >= existing().milestones.size()) &&
+                       // F-04: Admin arbitration verdicts and resolved_admin_arbitration status require verified platform admin credentials
+                       (isAdmin() || (incoming().disputeStatus != 'resolved_admin_arbitration' && (!('adminArbitration' in incoming()) || incoming().adminArbitration == null))) &&
+                       // F-03: Direct status transitions to 'cancelled' require admin or cannot be arbitrarily set from active without verified server settlement
+                       (isAdmin() || incoming().status != 'cancelled' || existing().status == 'cancelled' || existing().status == 'draft' || existing().status == 'pending_acceptance') &&
+                       // F-05: Disputed milestone escrow freeze: non-admin clients cannot mutate paymentState to 'released' on disputed milestones or while contract is under dispute
+                       (isAdmin() || (
+                         ((!(('disputeStatus' in existing()) && (existing().disputeStatus == 'open' || existing().disputeStatus == 'under_admin_review'))) || (incoming().milestones == existing().milestones)) &&
+                         isNoDisputedMilestoneTampered(existing().milestones, incoming().milestones)
+                       ));
+
+      // Delete: Platform Admin only
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 8. Financial Ledger Collection (Immutable Financial Transactions)
+    // ==========================================
+    match /financialLedger/{recordId} {
+      // Read: Contract participants or platform admin only
+      allow get, list: if isSignedIn() && (
+        resource.data.payerId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: F-02 Strictly Server-Authoritative (Platform Admin or verified backend role)
+      // Ordinary client-side participants cannot forge ledger records directly
+      allow create: if isSignedIn() && isValidLedgerRecord(incoming()) && isAdmin();
+
+      // Update & Delete: Strictly FORBIDDEN to ensure ledger immutability
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // 9. Talent Payout Accounts (Stripe Connect Setup)
+    // ==========================================
+    match /talentPayoutAccounts/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 10. Webhook Events (Idempotency Audit Store)
+    // ==========================================
+    match /webhookEvents/{eventId} {
+      allow get, list: if isAdmin();
+      allow create: if isSignedIn() || isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // 11. Conversations Collection (Project-Linked Messaging)
+    // ==========================================
+    match /conversations/{conversationId} {
+      // Read: Only contract creator, talent, or platform admin
+      allow get, list: if isSignedIn() && (
+        resource.data.creatorId == request.auth.uid ||
+        resource.data.talentId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Create: Client-first initiation rule!
+      // Only the contract creator (or admin) can create/initiate the conversation.
+      // Must link to an existing active/completed/disputed contract.
+      allow create: if isSignedIn() && isValidConversation(incoming()) && (
+        (
+          incoming().createdBy == request.auth.uid &&
+          incoming().creatorId == request.auth.uid &&
+          exists(/databases/$(database)/documents/contracts/$(incoming().contractId)) &&
+          get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.creatorId == request.auth.uid &&
+          get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.talentId == incoming().talentId &&
+          (
+            get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.status == 'active' ||
+            get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.status == 'completed' ||
+            get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.status == 'disputed'
+          )
+        ) ||
+        isAdmin()
+      );
+
+      // Update: Participants updating unread counters, last message metadata, or status
+      allow update: if isSignedIn() && (
+        resource.data.creatorId == request.auth.uid ||
+        resource.data.talentId == request.auth.uid ||
+        isAdmin()
+      ) && (
+        incoming().id == existing().id &&
+        incoming().contractId == existing().contractId &&
+        incoming().creatorId == existing().creatorId &&
+        incoming().talentId == existing().talentId &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt
+      );
+
+      // Delete: Strictly FORBIDDEN to preserve project communication audit trails
+      allow delete: if false;
+
+      // ==========================================
+      // Nested Messages Subcollection
+      // ==========================================
+      match /messages/{messageId} {
+        // Read: Only conversation participants or admin
+        allow get, list: if isSignedIn() && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.creatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.talentId == request.auth.uid ||
+          isAdmin()
+        );
+
+        // Create: Valid message created by authentic caller who is a conversation participant
+        allow create: if isSignedIn() && isValidMessage(incoming()) && (
+          incoming().senderId == request.auth.uid &&
+          incoming().conversationId == conversationId &&
+          (
+            (
+              get(/databases/$(database)/documents/conversations/$(conversationId)).data.creatorId == request.auth.uid &&
+              incoming().senderRole == 'creator'
+            ) ||
+            (
+              get(/databases/$(database)/documents/conversations/$(conversationId)).data.talentId == request.auth.uid &&
+              incoming().senderRole == 'talent' &&
+              get(/databases/$(database)/documents/conversations/$(conversationId)).data.status == 'active'
+            ) ||
+            isAdmin()
+          ) &&
+          // Archival policy: messages blocked if conversation is archived
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.status != 'archived'
+        );
+
+        // Update: Only allowed for read state updates (readBy, readAt)
+        allow update: if isSignedIn() && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.creatorId == request.auth.uid ||
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.talentId == request.auth.uid ||
+          isAdmin()
+        ) && (
+          incoming().id == existing().id &&
+          incoming().senderId == existing().senderId &&
+          incoming().body == existing().body &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().conversationId == existing().conversationId &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['readBy', 'readAt'])
+        );
+
+        // Delete: Strictly FORBIDDEN
+        allow delete: if false;
+      }
+    }
+
+    // ==========================================
+    // 10. Public Project Proofs (Immutable Verification Records)
+    // ==========================================
+    match /projectProofs/{proofId} {
+      // Read: Publicly readable for ecosystem proof verification
+      allow get, list: if true;
+
+      // Create: Strictly Server-Authoritative (Platform Admin context during contract completion transaction)
+      allow create: if isSignedIn() && isAdmin() && isValidProjectProof(incoming());
+
+      // Immutability: Once created, proof records CANNOT be altered or deleted
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // 11. Peer Contract Feedback & Reviews
+    // ==========================================
+    match /contractFeedback/{feedbackId} {
+      // Read: Public feedback is publicly readable; private feedback is restricted to participants and admins
+      allow get, list: if resource.data.isPublic == true ||
+                          (isSignedIn() && (
+                            resource.data.authorId == request.auth.uid ||
+                            resource.data.targetUserId == request.auth.uid ||
+                            isAdmin()
+                          ));
+
+      // Create: Enforces contract participant verification & terminal completion check at database boundary
+      allow create: if isSignedIn() &&
+                       request.auth.uid == incoming().authorId &&
+                       incoming().authorId != incoming().targetUserId &&
+                       feedbackId == 'feedback_' + incoming().contractId + '_' + incoming().authorId &&
+                       isValidFeedback(incoming()) &&
+                       exists(/databases/$(database)/documents/contracts/$(incoming().contractId)) &&
+                       get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.status == 'completed' &&
+                       (
+                         (
+                           get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.creatorId == incoming().authorId &&
+                           incoming().authorRole == 'creator' &&
+                           get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.talentId == incoming().targetUserId
+                         ) ||
+                         (
+                           get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.talentId == incoming().authorId &&
+                           incoming().authorRole == 'talent' &&
+                           get(/databases/$(database)/documents/contracts/$(incoming().contractId)).data.creatorId == incoming().targetUserId
+                         ) ||
+                         isAdmin()
+                       );
+
+      // Immutability: Reviews cannot be modified or deleted post-submission
+      allow update, delete: if false;
+    }
+
+    // ==========================================
+    // 12. Verifiable Work Transcripts (Phase 9A)
+    // ==========================================
+    match /transcripts/{transcriptId} {
+      // Read: Published transcripts are publicly verifiable; unreleased are owner-only
+      allow get, list: if resource.data.isPublished == true ||
+                          (isSignedIn() && (
+                            resource.data.talentId == request.auth.uid ||
+                            isAdmin()
+                          ));
+
+      // Create/Update: Only talent owner or admin can publish/sync their transcript
+      allow create, update: if isSignedIn() && (
+                              (request.auth.uid == incoming().talentId &&
+                               transcriptId == 'tr_' + incoming().talentId) ||
+                              isAdmin()
+                            );
+
+      // Delete: Owner or admin
+      allow delete: if isSignedIn() && (
+                      resource.data.talentId == request.auth.uid ||
+                      isAdmin()
+                    );
+    }
+
+    // ==========================================
+    // 13. Institutional Verifiable Credentials (Phase 9B)
+    // ==========================================
+    match /credentials/{credentialId} {
+      // Read: Public if isPublic is true, or if requester is recipient, issuer admin, or platform admin
+      allow get, list: if resource.data.isPublic == true ||
+                          (isSignedIn() && (
+                            resource.data.recipient.recipientUid == request.auth.uid ||
+                            resource.data.recipient.recipientEmail == request.auth.token.email ||
+                            resource.data.issuer.issuerAdminUid == request.auth.uid ||
+                            isAdmin()
+                          ));
+
+      // Create: Signed-in user acting as issuing admin or platform admin
+      allow create: if isSignedIn() && (
+                      (request.auth.uid == incoming().issuer.issuerAdminUid &&
+                       incoming().claimStatus == 'issued') ||
+                      isAdmin()
+                    );
+
+      // Update:
+      // 1. Recipient claiming or rejecting (only mutating claimStatus, claimedAt, recipientUid)
+      // 2. Issuer revoking (only mutating claimStatus to 'revoked', revocationStatus)
+      // 3. Platform Admin
+      allow update: if isSignedIn() && (
+                      // Case A: Recipient claiming or rejecting
+                      (
+                        (existing().recipient.recipientUid == request.auth.uid || existing().recipient.recipientEmail == request.auth.token.email) &&
+                        (incoming().claimStatus == 'claimed' || incoming().claimStatus == 'rejected') &&
+                        existing().claimStatus == 'issued' &&
+                        incoming().title == existing().title &&
+                        incoming().issuer.orgId == existing().issuer.orgId &&
+                        incoming().cryptographicProof.payloadDigest == existing().cryptographicProof.payloadDigest
+                      ) ||
+                      // Case B: Issuer revoking
+                      (
+                        existing().issuer.issuerAdminUid == request.auth.uid &&
+                        incoming().claimStatus == 'revoked' &&
+                        incoming().revocationStatus.isRevoked == true &&
+                        incoming().title == existing().title &&
+                        incoming().issuer.orgId == existing().issuer.orgId &&
+                        incoming().cryptographicProof.payloadDigest == existing().cryptographicProof.payloadDigest
+                      ) ||
+                      isAdmin()
+                    );
+
+      // Delete: Strictly disallowed for immutability and tamper-proof audit trail (except admin)
+      allow delete: if isAdmin();
+    }
+
+  }
+}
