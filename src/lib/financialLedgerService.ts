@@ -32,7 +32,31 @@ const memoryWebhookEvents: StripeWebhookEventRecord[] = [];
 const memoryTalentAccounts: Map<string, TalentStripeAccount> = new Map();
 
 /**
+ * Test hook for mocking/controlling the underlying Firestore writer in unit tests.
+ * In production/runtime, this is null and setDoc is invoked directly.
+ */
+export type LedgerFirestoreWriter = (ledgerRef: any, data: FinancialLedgerRecord) => Promise<void>;
+let customLedgerWriter: LedgerFirestoreWriter | null = null;
+
+export function setLedgerWriterForTesting(writer: LedgerFirestoreWriter | null): void {
+  customLedgerWriter = writer;
+}
+
+export function clearMemoryLedgerForTesting(): void {
+  memoryLedger.length = 0;
+}
+
+export function getMemoryLedgerForTesting(): readonly FinancialLedgerRecord[] {
+  return [...memoryLedger];
+}
+
+/**
  * Appends an immutable financial transaction record to the ledger.
+ *
+ * CRITICAL BUILDER'S PRINCIPLE & E-02 INVARIANT:
+ * Fail-closed durability: If Firestore persistence fails, the record is
+ * NOT appended to memoryLedger and no successful transaction is returned.
+ * The authoritative failure is propagated immediately to the caller.
  */
 export async function appendLedgerRecord(record: FinancialLedgerRecord): Promise<FinancialLedgerRecord> {
   const immutableRecord: FinancialLedgerRecord = {
@@ -40,13 +64,15 @@ export async function appendLedgerRecord(record: FinancialLedgerRecord): Promise
     createdAt: record.createdAt || new Date().toISOString(),
   };
 
-  try {
-    const ledgerRef = doc(db, 'financialLedger', immutableRecord.id);
+  const ledgerRef = doc(db, 'financialLedger', immutableRecord.id);
+
+  if (customLedgerWriter) {
+    await customLedgerWriter(ledgerRef, immutableRecord);
+  } else {
     await setDoc(ledgerRef, immutableRecord);
-  } catch (err) {
-    console.warn('[FinancialLedger] Could not persist to Firestore, saving in-memory:', err);
   }
 
+  // Only reached after authoritative Firestore confirmation
   const existingIdx = memoryLedger.findIndex((r) => r.id === immutableRecord.id);
   if (existingIdx >= 0) {
     memoryLedger[existingIdx] = immutableRecord;

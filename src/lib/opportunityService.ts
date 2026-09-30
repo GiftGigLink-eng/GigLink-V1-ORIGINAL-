@@ -15,12 +15,25 @@ import { Opportunity, OpportunityApplication, PublicTrustPassport } from '../typ
 /**
  * In-memory authoritative caches for opportunity and application documents
  */
-const opportunitiesStore = new Map<string, Opportunity>();
-const applicationsStore = new Map<string, OpportunityApplication>();
+export const opportunitiesStore = new Map<string, Opportunity>();
+export const applicationsStore = new Map<string, OpportunityApplication>();
 
 export function clearOpportunityStore(): void {
   opportunitiesStore.clear();
   applicationsStore.clear();
+}
+
+export type ApplicationsQueryReader = (opportunityId: string, creatorId?: string) => Promise<OpportunityApplication[]>;
+export type MyApplicationsQueryReader = (applicantId: string) => Promise<OpportunityApplication[]>;
+let customApplicationsReader: ApplicationsQueryReader | null = null;
+let customMyApplicationsReader: MyApplicationsQueryReader | null = null;
+
+export function setApplicationsReaderForTesting(reader: ApplicationsQueryReader | null): void {
+  customApplicationsReader = reader;
+}
+
+export function setMyApplicationsReaderForTesting(reader: MyApplicationsQueryReader | null): void {
+  customMyApplicationsReader = reader;
 }
 
 export interface OpportunityFilterParams {
@@ -155,6 +168,38 @@ export async function getMyPostedOpportunities(creatorId: string): Promise<Oppor
 
   const results = Array.from(opportunitiesStore.values())
     .filter((opp) => opp.creatorId === creatorId)
+    .sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
+    });
+
+  return results;
+}
+
+/**
+ * Public, read-only fetch of open/published opportunities posted by a specific creator/client.
+ * Strictly queries for status === 'open' to ensure drafts, closed, and in-progress opportunities
+ * are not exposed to public profile visitors.
+ */
+export async function getPublicOpportunitiesByCreator(creatorId: string): Promise<Opportunity[]> {
+  try {
+    const q = query(
+      collection(db, 'opportunities'),
+      where('creatorId', '==', creatorId),
+      where('status', '==', 'open')
+    );
+    const snapshot = await getDocs(q);
+    snapshot.docs.forEach((docSnap) => {
+      const opp = { id: docSnap.id, ...(docSnap.data() as Omit<Opportunity, 'id'>) };
+      opportunitiesStore.set(opp.id, opp);
+    });
+  } catch (error) {
+    console.warn('[OpportunityService] getPublicOpportunitiesByCreator notice:', error);
+  }
+
+  const results = Array.from(opportunitiesStore.values())
+    .filter((opp) => opp.creatorId === creatorId && (opp.status === 'open' || opp.status === 'published'))
     .sort((a, b) => {
       const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
@@ -433,6 +478,10 @@ export async function getApplicationsForOpportunity(
   opportunityId: string,
   creatorId?: string
 ): Promise<OpportunityApplication[]> {
+  if (customApplicationsReader) {
+    return await customApplicationsReader(opportunityId, creatorId);
+  }
+
   try {
     const currentUid = creatorId || auth.currentUser?.uid;
     let q;
@@ -455,6 +504,10 @@ export async function getApplicationsForOpportunity(
     });
   } catch (error) {
     console.warn(`[OpportunityService] getApplicationsForOpportunity notice:`, error);
+    const cached = Array.from(applicationsStore.values()).filter((a) => a.opportunityId === opportunityId);
+    if (cached.length === 0) {
+      throw error;
+    }
   }
 
   const results = Array.from(applicationsStore.values())
@@ -472,6 +525,10 @@ export async function getApplicationsForOpportunity(
  * Fetch all applications submitted by the current applicant.
  */
 export async function getMyApplications(applicantId: string): Promise<OpportunityApplication[]> {
+  if (customMyApplicationsReader) {
+    return await customMyApplicationsReader(applicantId);
+  }
+
   try {
     const q = query(
       collection(db, 'applications'),
@@ -484,6 +541,10 @@ export async function getMyApplications(applicantId: string): Promise<Opportunit
     });
   } catch (error) {
     console.warn(`[OpportunityService] getMyApplications notice:`, error);
+    const cached = Array.from(applicationsStore.values()).filter((a) => a.applicantId === applicantId);
+    if (cached.length === 0) {
+      throw error;
+    }
   }
 
   const results = Array.from(applicationsStore.values())

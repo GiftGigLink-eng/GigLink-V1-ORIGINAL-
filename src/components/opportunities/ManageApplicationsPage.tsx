@@ -25,6 +25,7 @@ import {
   Eye,
   Layers,
   FileText,
+  RefreshCw,
 } from 'lucide-react';
 
 export const ManageApplicationsPage: React.FC = () => {
@@ -39,10 +40,16 @@ export const ManageApplicationsPage: React.FC = () => {
   const [selectedAppForDrawer, setSelectedAppForDrawer] = useState<OpportunityApplication | null>(null);
   const [updating, setUpdating] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'proposals' | 'applications'>('proposals');
+  const [loadError, setLoadError] = useState<{
+    message: string;
+    isNetwork: boolean;
+    isAuth: boolean;
+  } | null>(null);
 
   const loadData = async () => {
     if (!id) return;
     setLoading(true);
+    setLoadError(null);
     try {
       const opp = await getOpportunityById(id);
       setOpportunity(opp);
@@ -50,8 +57,32 @@ export const ManageApplicationsPage: React.FC = () => {
       const creatorId = opp?.creatorId || user?.uid;
       const apps = await getApplicationsForOpportunity(id, creatorId);
       setApplications(apps);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error loading applications:', err);
+      const errMsg = (err?.message || String(err)).toLowerCase();
+      const errCode = (err?.code || '').toLowerCase();
+      const isNetwork =
+        errCode.includes('unavailable') ||
+        errCode.includes('deadline-exceeded') ||
+        errMsg.includes('offline') ||
+        errMsg.includes('failed to fetch') ||
+        errMsg.includes('network') ||
+        errMsg.includes('connection lost');
+      const isAuth =
+        errCode.includes('permission-denied') ||
+        errCode.includes('unauthenticated') ||
+        errMsg.includes('permission') ||
+        errMsg.includes('unauthorized');
+
+      setLoadError({
+        message: isNetwork
+          ? 'Connection interrupted. We could not load applicants right now.'
+          : isAuth
+          ? 'You do not have permission to view applications for this listing.'
+          : 'Failed to load applications. Please try again.',
+        isNetwork,
+        isAuth,
+      });
     } finally {
       setLoading(false);
     }
@@ -205,6 +236,33 @@ export const ManageApplicationsPage: React.FC = () => {
                   className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 animate-pulse h-40"
                 />
               ))}
+            </div>
+          ) : loadError ? (
+            <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-10 sm:p-12 text-center shadow-xs">
+              <div className="w-14 h-14 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-rose-200 dark:border-rose-800/50">
+                <AlertCircle className="w-7 h-7" />
+              </div>
+              <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mb-2">
+                {loadError.isNetwork
+                  ? 'Connection Interrupted'
+                  : loadError.isAuth
+                  ? 'Access Denied'
+                  : 'Unable to Load Applicants'}
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+                {loadError.message}
+              </p>
+              {!loadError.isAuth && (
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => loadData()}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span>Retry</span>
+                  </button>
+                </div>
+              )}
             </div>
           ) : filteredApplications.length === 0 ? (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-12 text-center">

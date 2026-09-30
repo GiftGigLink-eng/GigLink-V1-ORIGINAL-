@@ -89,17 +89,50 @@ export function clearContractStore(): void {
 }
 
 /**
- * Persists contract changes to in-memory store and attempts Firestore synchronization.
+ * Returns all in-memory contracts for fallback aggregation
+ */
+export function getAllInMemoryContracts(): GigLinkContract[] {
+  return Array.from(contractsStore.values()).map(normalizeContractData);
+}
+
+/**
+ * Test hook for mocking/controlling the underlying Firestore writer in unit tests.
+ * In production/runtime, this is null and setDoc is invoked directly.
+ */
+export type ContractFirestoreWriter = (contractRef: any, data: GigLinkContract) => Promise<void>;
+let customContractWriter: ContractFirestoreWriter | null = null;
+
+export function setContractWriterForTesting(writer: ContractFirestoreWriter | null): void {
+  customContractWriter = writer;
+}
+
+export type ContractQueryReader = (userId: string) => Promise<GigLinkContract[]>;
+let customContractReader: ContractQueryReader | null = null;
+
+export function setContractReaderForTesting(reader: ContractQueryReader | null): void {
+  customContractReader = reader;
+}
+
+/**
+ * Persists contract changes authoritatively.
+ *
+ * CRITICAL BUILDER'S PRINCIPLE & E-01 INVARIANT:
+ * Fail-closed durability: If the authoritative Firestore write fails,
+ * the error is propagated and the in-memory contractsStore is NEVER mutated
+ * with the uncommitted state. Option A (Authoritative-first) is enforced.
  */
 export async function persistContract(contract: GigLinkContract): Promise<void> {
   const normalized = normalizeContractData(contract);
-  contractsStore.set(normalized.id, normalized);
-  try {
-    const contractRef = doc(db, 'contracts', normalized.id);
+  const contractRef = doc(db, 'contracts', normalized.id);
+
+  if (customContractWriter) {
+    await customContractWriter(contractRef, normalized);
+  } else {
     await setDoc(contractRef, normalized);
-  } catch (err) {
-    console.warn('[ContractService] Firestore sync notice (in-memory store active):', err);
   }
+
+  // Only reached after authoritative Firestore confirmation
+  contractsStore.set(normalized.id, normalized);
 }
 
 /**
@@ -324,7 +357,7 @@ export async function getContract(contractId: string): Promise<GigLinkContract |
       return data;
     }
   } catch (err) {
-    // Return null or in-memory state safely
+    // Return null safely if document cannot be fetched
   }
 
   return null;
@@ -365,6 +398,10 @@ export async function getContractByApplicationId(applicationId: string): Promise
 export async function getContractsForUser(userId: string): Promise<GigLinkContract[]> {
   if (!userId) return [];
 
+  if (customContractReader) {
+    return await customContractReader(userId);
+  }
+
   const results = new Map<string, GigLinkContract>();
 
   // Check in-memory
@@ -393,7 +430,9 @@ export async function getContractsForUser(userId: string): Promise<GigLinkContra
       contractsStore.set(c.id, c);
     });
   } catch (err) {
-    // Return in-memory fallback safely
+    if (results.size === 0) {
+      throw err;
+    }
   }
 
   return Array.from(results.values());

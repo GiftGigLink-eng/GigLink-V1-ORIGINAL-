@@ -7,7 +7,7 @@
  * HTML/JSON parsing crashes.
  */
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
 export class BackendUnavailableError extends Error {
   public readonly isBackendUnavailable = true;
@@ -70,6 +70,58 @@ export async function postApi<T = any>(
     error.code = data?.code;
     error.cooldownRemaining = data?.cooldownRemaining;
     error.remainingAttempts = data?.remainingAttempts;
+    error.data = data;
+    throw error;
+  }
+
+  return data as T;
+}
+
+export async function getApi<T = any>(
+  endpoint: string,
+  headers?: Record<string, string>
+): Promise<T> {
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${API_BASE_URL}${normalizedEndpoint}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        ...headers,
+      },
+    });
+  } catch (networkErr: any) {
+    throw new BackendUnavailableError(
+      normalizedEndpoint,
+      `Backend service is unreachable at ${url}. ${networkErr?.message || 'Network connection failed.'}`
+    );
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('text/html')) {
+    throw new BackendUnavailableError(
+      normalizedEndpoint,
+      `The backend endpoint '${normalizedEndpoint}' returned static HTML.`
+    );
+  }
+
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    throw new BackendUnavailableError(
+      normalizedEndpoint,
+      `Invalid response format received from '${normalizedEndpoint}'. Expected JSON response.`
+    );
+  }
+
+  if (!response.ok) {
+    const error: any = new Error(data?.error || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    error.code = data?.code;
     error.data = data;
     throw error;
   }

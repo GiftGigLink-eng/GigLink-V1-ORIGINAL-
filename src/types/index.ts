@@ -101,6 +101,36 @@ export function mapRoleToPersona(role: GigLinkRole): UserPersona {
   }
 }
 
+/**
+ * Normalizes any role/persona string into one of the 4 canonical user personas:
+ * - learner
+ * - partner
+ * - client
+ * - organization_admin
+ */
+export function normalizeCanonicalPersona(
+  persona?: string | null,
+  fallbackRole?: GigLinkRole | string | null
+): UserPersona {
+  if (persona) {
+    const p = persona.toLowerCase();
+    if (p === 'client' || p === 'creator') return 'client';
+    if (p === 'partner') return 'partner';
+    if (p === 'learner' || p === 'talent') return 'learner';
+    if (p === 'organization_admin' || p === 'enterprise' || p === 'admin' || p === 'verifier' || p === 'platform_admin') {
+      return 'organization_admin';
+    }
+  }
+  if (fallbackRole) {
+    const r = fallbackRole.toLowerCase();
+    if (r === 'creator' || r === 'client') return 'client';
+    if (r === 'enterprise' || r === 'admin' || r === 'organization_admin' || r === 'verifier' || r === 'platform_admin') return 'organization_admin';
+    if (r === 'partner') return 'partner';
+    if (r === 'talent' || r === 'learner') return 'learner';
+  }
+  return 'learner';
+}
+
 export type OrganizationType = 'company' | 'institution';
 
 export type VerificationStatus = 'unverified' | 'pending' | 'verified' | 'rejected';
@@ -129,6 +159,10 @@ export interface UserProfile {
   portfolioUrl?: string;
   githubUrl?: string;
   linkedinUrl?: string;
+  hiringInterests?: string[];
+  talentTypes?: string[];
+  customHiringNeed?: string;
+  publishHiringFocus?: boolean;
   organization?: {
     name?: string;
     type?: OrganizationType;
@@ -144,6 +178,7 @@ export interface SkillItem {
   proficiency: 'beginner' | 'intermediate' | 'advanced' | 'expert';
   verifiedCount: number;
   lastAssessedAt?: string;
+  verified?: boolean;
 }
 
 export type ProjectStatus = 'draft' | 'published' | 'completed' | 'in_progress';
@@ -170,6 +205,7 @@ export interface ProjectProof {
   verifierName?: string;
   verifierUid?: string;
   verifiedAt?: string;
+  verificationHash?: string;
 }
 
 export interface CertificationItem {
@@ -312,6 +348,10 @@ export interface TrustPassport {
   availability?: WorkAvailability;
   partnerServices?: PartnerServiceOffering[];
   potentialTrajectory?: PotentialTrajectoryIndicator;
+  hiringInterests?: string[];
+  talentTypes?: string[];
+  customHiringNeed?: string;
+  publishHiringFocus?: boolean;
   reviews: WorkReview[];
   metrics: TrustMetrics;
   trustMetrics?: TrustMetrics;
@@ -322,6 +362,8 @@ export interface TrustPassport {
 export interface PublicTrustPassport {
   userId: string;
   uid?: string;
+  persona?: UserPersona;
+  activePersona?: UserPersona;
   organizationId?: string;
   isPublic?: boolean;
   displayName: string;
@@ -346,6 +388,10 @@ export interface PublicTrustPassport {
   availability?: WorkAvailability;
   partnerServices?: PartnerServiceOffering[];
   potentialTrajectory?: PotentialTrajectoryIndicator;
+  hiringInterests?: string[];
+  talentTypes?: string[];
+  customHiringNeed?: string;
+  publishHiringFocus?: boolean;
   reviews: WorkReview[];
   metrics: TrustMetrics;
   updatedAt: string;
@@ -370,6 +416,10 @@ export interface UnifiedProfileData {
   availability?: WorkAvailability;
   partnerServices?: PartnerServiceOffering[];
   potentialTrajectory?: PotentialTrajectoryIndicator;
+  hiringInterests?: string[];
+  talentTypes?: string[];
+  customHiringNeed?: string;
+  publishHiringFocus?: boolean;
   isPublic: boolean;
   identityVerified: boolean;
   trustScore: number;
@@ -808,6 +858,31 @@ export interface AIAdvisoryResponse {
   recommendedSkillsToAcquire: string[];
   readinessScore?: number;
   explanation: string;
+}
+
+export interface IlAiActionItem {
+  label: string;
+  actionType: 'navigate' | 'filter' | 'review' | 'info';
+  target?: string;
+}
+
+export interface IlAiGuidancePayload {
+  greeting: string;
+  summary: string;
+  guidance: string;
+  suggestedActions: IlAiActionItem[];
+  contextualTip?: string;
+  trustInvariantNote?: string;
+}
+
+export interface IlAiClientRequest {
+  message?: string;
+  routePath: string;
+  entityHints?: {
+    opportunityId?: string;
+    applicationId?: string;
+    contractId?: string;
+  };
 }
 
 export interface MatchedSkillItem {

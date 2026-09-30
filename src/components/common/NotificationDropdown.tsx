@@ -89,6 +89,9 @@ function getNotificationIcon(type: AppNotification['type']) {
   }
 }
 
+import { getNotificationWorkspaceDestination } from '../../lib/notificationService';
+export { getNotificationWorkspaceDestination };
+
 export const NotificationDropdown: React.FC<{ isMobile?: boolean }> = ({ isMobile = false }) => {
   const navigate = useNavigate();
   const { user, activePersona } = useAuth();
@@ -115,12 +118,6 @@ export const NotificationDropdown: React.FC<{ isMobile?: boolean }> = ({ isMobil
     markAsRead(notif.id);
     setIsOpen(false);
     navigate(notif.linkUrl);
-  };
-
-  const getWorkspaceDestination = () => {
-    if (activePersona === 'creator') return '/creator/dashboard';
-    if (activePersona === 'enterprise') return '/enterprise/dashboard';
-    return '/my-applications';
   };
 
   return (
@@ -245,27 +242,25 @@ export const NotificationDropdown: React.FC<{ isMobile?: boolean }> = ({ isMobil
           </div>
 
           {/* Footer */}
-          {notifications.length > 0 && (
-            <div className="p-2.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 text-center">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsOpen(false);
-                  navigate(getWorkspaceDestination());
-                }}
-                className="text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 inline-flex items-center gap-1.5 min-h-[44px] px-3 transition-colors"
-              >
-                <span>
-                  {activePersona === 'creator'
-                    ? 'Go to Creator Hiring Hub'
-                    : activePersona === 'enterprise'
-                    ? 'Go to Enterprise Command Center'
-                    : 'View all my applications'}
-                </span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+          {notifications.length > 0 && (() => {
+            const dest = getNotificationWorkspaceDestination(activePersona);
+            return (
+              <div className="p-2.5 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/50 text-center">
+                <button
+                  type="button"
+                  id="notification-footer-workspace-btn"
+                  onClick={() => {
+                    setIsOpen(false);
+                    navigate(dest.path);
+                  }}
+                  className="text-xs font-semibold text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 inline-flex items-center gap-1.5 min-h-[44px] px-3 transition-colors"
+                >
+                  <span>{dest.label}</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

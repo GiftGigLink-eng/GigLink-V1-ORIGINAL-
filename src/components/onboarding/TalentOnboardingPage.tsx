@@ -6,6 +6,7 @@ import { useToast } from '../../context/ToastContext';
 import { StructuredLocation, ROLE_DEFINITIONS } from '../../types';
 import { BackNavButton } from '../layout/BackNavButton';
 import { HierarchicalLocationSelector } from '../common/HierarchicalLocationSelector';
+import { SearchableSkillSelector } from '../common/SearchableSkillSelector';
 
 export const TalentOnboardingPage: React.FC = () => {
   const { user, profile, activeRole, completeIndividualOnboarding } = useAuth();
@@ -216,47 +217,18 @@ export const TalentOnboardingPage: React.FC = () => {
             </div>
 
             {/* Skills */}
-            <div>
-              <label className="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                Core Skills & Capabilities <span className="text-rose-500">*</span>
-              </label>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-                Select skills from the canonical catalogue. These appear on your Trust Passport.
-              </p>
-              <div className="space-y-3">
-                <div className="flex flex-wrap gap-2 mb-2">
-                  {skills.map((skill) => (
-                    <span
-                      key={skill}
-                      className="inline-flex items-center gap-1.5 px-3 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 text-xs font-semibold rounded-full border border-indigo-200 dark:border-indigo-800"
-                    >
-                      {skill}
-                      <button
-                        type="button"
-                        onClick={() => setSkills(skills.filter((s) => s !== skill))}
-                        className="hover:text-indigo-900 dark:hover:text-white font-bold ml-1"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-                <input
-                  type="text"
-                  placeholder="Type a skill (e.g. React, TypeScript, Python, UI Design) and press Enter"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      const val = (e.target as HTMLInputElement).value.trim();
-                      if (val && !skills.includes(val) && skills.length < 15) {
-                        setSkills([...skills, val]);
-                        (e.target as HTMLInputElement).value = '';
-                      }
-                    }
-                  }}
-                  className="block w-full px-4 py-2.5 text-slate-900 dark:text-white bg-slate-50 dark:bg-slate-900/80 border border-slate-300 dark:border-slate-600 rounded-xl focus:ring-2 focus:ring-indigo-500 text-sm"
-                />
-              </div>
+            <div id="talent-onboarding-skills-section">
+              <SearchableSkillSelector
+                selectedSkills={skills}
+                onChange={setSkills}
+                minSkills={1}
+                maxSkills={15}
+                label="Core Skills & Capabilities"
+                description="Select skills from the canonical catalogue. These appear on your Trust Passport."
+                placeholder="Search canonical skills catalogue or click arrow to browse..."
+                allowCustom={true}
+                error={errorMessage && skills.length === 0 ? errorMessage : null}
+              />
             </div>
 
             {/* Portfolio / Project Proof (Optional Initial Proof) */}

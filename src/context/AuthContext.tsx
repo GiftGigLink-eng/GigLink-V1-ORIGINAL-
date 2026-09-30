@@ -17,7 +17,7 @@ import {
   applyActionCode,
   updateProfile,
 } from 'firebase/auth';
-import { doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { doc, setDoc, deleteDoc, onSnapshot, getDocFromServer } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import {
   UserProfile,
@@ -44,9 +44,10 @@ import { getSkillByName } from '../lib/catalogue/skills';
 import { sanitizeStructuredLocation } from '../lib/catalogue/locations';
 import {
   getUnifiedProfileData,
-  sanitizePublicPassportProjection,
   buildPassportUpdatePayload,
+  validateProfileImageUrl,
 } from '../lib/profileService';
+import { requestAuthoritativeTrustRecalculation } from '../lib/trustSyncClient';
 import { postApi } from '../lib/apiClient';
 
 export function getAuthErrorMessage(error: any): string {
@@ -123,6 +124,7 @@ interface AuthContextType {
     hiringInterests?: string[];
     talentTypes?: string[];
     customHiringNeed?: string;
+    publishHiringFocus?: boolean;
   }) => Promise<void>;
   completeOrganizationOnboarding: (data: {
     persona: UserPersona;
@@ -159,9 +161,14 @@ interface AuthContextType {
         | 'portfolioUrl'
         | 'availability'
         | 'partnerServices'
+        | 'hiringInterests'
+        | 'talentTypes'
+        | 'customHiringNeed'
+        | 'publishHiringFocus'
       >
     >
   ) => Promise<void>;
+  updateProfilePicture: (photoURL: string) => Promise<void>;
   submitIdentityVerification: (
     documentType: IdentityDocumentType,
     documentNumberMasked: string,
@@ -198,16 +205,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activePersona, setActivePersona] = useState<UserPersona>('learner');
   const [loading, setLoading] = useState(true);
   const [firestoreConnected, setFirestoreConnected] = useState(false);
+  const [isTokenAdmin, setIsTokenAdmin] = useState(false);
 
   // Compute dual-read unified profile data whenever user, profile, or passport changes
   const unifiedProfile = user
     ? getUnifiedProfileData(profile, passport, user.emailVerified)
     : null;
 
-  const rawAllowed: string[] = (profile?.allowedRoles as string[]) || ['talent', 'creator', 'enterprise', 'admin'];
+  // Canonical platform roles for normal users: talent (learner/partner), creator (client), enterprise (organization_admin)
+  const canonicalDefaults: GigLinkRole[] = ['talent', 'creator', 'enterprise'];
+  const rawAllowed: string[] = (profile?.allowedRoles as string[]) || canonicalDefaults;
+  // Strictly filter 'admin': only permitted if verified token claims explicitly grant it
+  const filteredAllowed = rawAllowed.filter((r) => r !== 'admin' || isTokenAdmin);
+
   const allowedRoles: GigLinkRole[] = Array.from(
     new Set(
-      rawAllowed.map((r) => (r === 'client' ? 'creator' : (r as GigLinkRole)))
+      filteredAllowed.map((r) => (r === 'client' ? 'creator' : (r as GigLinkRole)))
     )
   );
   if (
@@ -216,6 +229,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   ) {
     allowedRoles.push('creator');
   }
+  if (isTokenAdmin && !allowedRoles.includes('admin')) {
+    allowedRoles.push('admin');
+  }
+
+  // Test initial connection to Firestore backend per Firebase Integration guidelines
+  useEffect(() => {
+    let isMounted = true;
+    async function testConnection() {
+      try {
+        await getDocFromServer(doc(db, 'publicTrustPassports', 'connection-probe'));
+        if (isMounted) setFirestoreConnected(true);
+      } catch (error: any) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.warn('[Firestore] Client operating in offline mode while connecting to backend.');
+          if (isMounted) setFirestoreConnected(false);
+        } else if (error?.code === 'permission-denied') {
+          // Connected to backend and permission check executed
+          if (isMounted) setFirestoreConnected(true);
+        } else {
+          // Other responses indicate server reached
+          if (isMounted) setFirestoreConnected(true);
+        }
+      }
+    }
+    testConnection();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Sync Auth State & Firestore Profile
   useEffect(() => {
@@ -240,9 +282,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!currentUser) {
         setProfile(null);
         setPassport(null);
+        setIsTokenAdmin(false);
         setLoading(false);
         return;
       }
+
+      // Check for cryptographic admin claim in token
+      currentUser
+        .getIdTokenResult()
+        .then((tokenResult) => {
+          const claims = (tokenResult?.claims as any) || {};
+          const hasAdminClaim = Boolean(claims.admin === true || claims.role === 'admin');
+          setIsTokenAdmin(hasAdminClaim);
+        })
+        .catch((err) => {
+          console.warn('[AuthContext] Could not inspect ID token claims:', err);
+          setIsTokenAdmin(false);
+        });
 
       const userRef = doc(db, 'users', currentUser.uid);
       const passportRef = doc(db, 'trustPassports', currentUser.uid);
@@ -260,14 +316,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setActiveRole(derivedRole);
             setActivePersona(data.activePersona || mapRoleToPersona(derivedRole));
           } else {
-            // Initialize default profile for new user
+            // Initialize default profile for new user - strictly canonical roles only
             const newProfile: UserProfile = {
               uid: currentUser.uid,
               email: currentUser.email || '',
               displayName: currentUser.displayName || 'New User',
               photoURL: currentUser.photoURL || '',
               activeRole: 'talent',
-              allowedRoles: ['talent', 'creator', 'enterprise', 'admin'],
+              allowedRoles: ['talent', 'creator', 'enterprise'],
               activePersona: 'learner',
               availablePersonas: ['learner', 'partner', 'client', 'organization_admin'],
               onboardingCompleted: false,
@@ -314,6 +370,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         (error) => {
           // If auth state has changed or user signed out, gracefully ignore stale listener callbacks
           if (auth.currentUser && auth.currentUser.uid === currentUser.uid) {
+            const errMsg = error?.message || String(error);
+            if (
+              errMsg.includes('the client is offline') ||
+              errMsg.includes('backend') ||
+              errMsg.includes('closing') ||
+              errMsg.includes('hidden') ||
+              errMsg.includes('Database is closing') ||
+              error?.code === 'unavailable'
+            ) {
+              console.warn(`[AuthContext] Firestore listener offline/reconnecting for users/${currentUser.uid}:`, errMsg);
+              setLoading(false);
+              return;
+            }
             handleFirestoreError(error, OperationType.GET, `users/${currentUser.uid}`);
           }
         }
@@ -328,17 +397,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const currentPass = docSnap.data() as TrustPassport;
             setPassport(currentPass);
 
-            // Synchronize public projection in isolated publicTrustPassports collection
+            // Synchronize public projection via server-authoritative endpoint
             const publicPassportRef = doc(db, 'publicTrustPassports', currentUser.uid);
             if (currentPass.isPublic === true) {
-              const sanitizedPublicDoc = sanitizePublicPassportProjection(
-                currentPass,
-                profile,
-                currentUser.emailVerified
-              );
-
               try {
-                await setDoc(publicPassportRef, sanitizedPublicDoc);
+                // Authoritative recalculation and public projection write strictly managed by server
+                const serverSync = await requestAuthoritativeTrustRecalculation(currentUser.uid);
+                if (!serverSync.success) {
+                  console.warn(
+                    '[TrustSync] Authoritative public passport synchronization deferred/failed:',
+                    serverSync.error
+                  );
+                }
               } catch (syncErr) {
                 console.error('Failed to sync public passport projection:', syncErr);
               }
@@ -355,6 +425,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         (error) => {
           // If auth state has changed or user signed out, gracefully ignore stale listener callbacks
           if (auth.currentUser && auth.currentUser.uid === currentUser.uid) {
+            const errMsg = error?.message || String(error);
+            if (
+              errMsg.includes('the client is offline') ||
+              errMsg.includes('backend') ||
+              errMsg.includes('closing') ||
+              errMsg.includes('hidden') ||
+              errMsg.includes('Database is closing') ||
+              error?.code === 'unavailable'
+            ) {
+              console.warn(`[AuthContext] Firestore listener offline/reconnecting for trustPassports/${currentUser.uid}:`, errMsg);
+              return;
+            }
             handleFirestoreError(error, OperationType.GET, `trustPassports/${currentUser.uid}`);
           }
         }
@@ -565,7 +647,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const switchRole = async (newRole: GigLinkRole) => {
     if (!user) return;
-    const currentAllowed = profile?.allowedRoles || ['talent', 'creator', 'enterprise', 'admin'];
+    if (newRole === 'admin' && !isTokenAdmin) {
+      console.warn('Blocked unauthorized attempt to switch to admin without token claim.');
+      return;
+    }
+    const currentAllowed = allowedRoles;
     if (!currentAllowed.includes(newRole)) {
       console.warn(`Role ${newRole} is not in allowedRoles:`, currentAllowed);
       return;
@@ -627,6 +713,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     hiringInterests?: string[];
     talentTypes?: string[];
     customHiringNeed?: string;
+    publishHiringFocus?: boolean;
   }) => {
     if (!user) throw new Error('User must be authenticated to complete onboarding.');
     const userRef = doc(db, 'users', user.uid);
@@ -675,6 +762,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           displayName: data.displayName,
           onboardingCompleted: true,
           updatedAt: now,
+          ...(data.hiringInterests ? { hiringInterests: data.hiringInterests } : {}),
+          ...(data.talentTypes ? { talentTypes: data.talentTypes } : {}),
+          ...(data.customHiringNeed ? { customHiringNeed: data.customHiringNeed } : {}),
         },
         { merge: true }
       );
@@ -699,6 +789,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           },
           ...(initialProofs.length > 0 ? { projectProofs: initialProofs } : {}),
           ...(initialExp.length > 0 ? { experience: initialExp } : {}),
+          ...(data.hiringInterests ? { hiringInterests: data.hiringInterests } : {}),
+          ...(data.talentTypes ? { talentTypes: data.talentTypes } : {}),
+          ...(data.customHiringNeed ? { customHiringNeed: data.customHiringNeed } : {}),
+          publishHiringFocus: data.publishHiringFocus === true,
           identityVerified: false,
           updatedAt: now,
         },
@@ -816,6 +910,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         | 'portfolioUrl'
         | 'availability'
         | 'partnerServices'
+        | 'hiringInterests'
+        | 'talentTypes'
+        | 'customHiringNeed'
+        | 'publishHiringFocus'
       >
     >
   ) => {
@@ -826,6 +924,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await setDoc(passportRef, payload, { merge: true });
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `trustPassports/${user.uid}`);
+    }
+  };
+
+  const updateProfilePicture = async (newPhotoURL: string) => {
+    if (!auth.currentUser || !user) {
+      throw new Error('User must be authenticated to update profile picture.');
+    }
+
+    const validation = validateProfileImageUrl(newPhotoURL, { allowEmpty: true });
+    if (!validation.isValid) {
+      throw new Error(validation.error || 'Invalid profile picture URL.');
+    }
+
+    const sanitized = validation.sanitizedUrl || '';
+    const now = new Date().toISOString();
+    const userRef = doc(db, 'users', user.uid);
+
+    try {
+      // 1. Authoritative write to users/{uid}
+      await setDoc(userRef, { photoURL: sanitized, updatedAt: now }, { merge: true });
+
+      // 2. Synchronize Firebase Auth currentUser profile
+      if (auth.currentUser) {
+        await updateProfile(auth.currentUser, { photoURL: sanitized || '' });
+      }
+
+      // 3. Synchronize publicTrustPassports projection if public
+      if (passport?.isPublic === true) {
+        try {
+          await requestAuthoritativeTrustRecalculation(user.uid);
+        } catch (syncErr) {
+          console.warn('[TrustSync] Public passport recalculation deferred after photoURL update:', syncErr);
+        }
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
     }
   };
 
@@ -864,44 +998,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     rejectionReason?: string
   ) => {
     if (!user) throw new Error('User must be authenticated to review.');
-    const verifRef = doc(db, 'verifications', verificationId);
-    const subjectPassportRef = doc(db, 'trustPassports', subjectUserId);
-    const now = new Date().toISOString();
+    if (user.uid === subjectUserId) {
+      throw new Error('Unauthorized: You cannot review your own verification submission.');
+    }
 
     try {
-      await setDoc(
-        verifRef,
-        {
-          status,
-          reviewedAt: now,
-          verifierId: user.uid,
-          rejectionReason: rejectionReason || null,
+      const idToken = await user.getIdToken();
+      const response = await fetch('/api/verifications/review-identity', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
         },
-        { merge: true }
-      );
+        body: JSON.stringify({
+          verificationId,
+          subjectUserId,
+          status,
+          rejectionReason: rejectionReason || null,
+        }),
+      });
 
-      // If approved, update subject's passport identityVerified status
-      if (status === 'verified') {
-        await setDoc(
-          subjectPassportRef,
-          {
-            identityVerified: true,
-            updatedAt: now,
-          },
-          { merge: true }
-        );
-      } else if (status === 'rejected') {
-        await setDoc(
-          subjectPassportRef,
-          {
-            identityVerified: false,
-            updatedAt: now,
-          },
-          { merge: true }
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(
+          errorData.error || `Server verification review failed with status ${response.status}`
         );
       }
-    } catch (err) {
+    } catch (err: any) {
+      console.error('[reviewIdentityVerification] Failed:', err);
       handleFirestoreError(err, OperationType.WRITE, `verifications/${verificationId}`);
+      throw err;
     }
   };
 
@@ -1200,6 +1326,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         completeOrganizationOnboarding,
         updatePassportVisibility,
         updatePassportDetails,
+        updateProfilePicture,
         submitIdentityVerification,
         reviewIdentityVerification,
         addProjectProof,

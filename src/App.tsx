@@ -38,6 +38,8 @@ import { AdminDashboardPage } from './components/workspaces/admin/AdminDashboard
 import { AdminVerificationsPage } from './components/workspaces/admin/AdminVerificationsPage';
 import { AdminProofsPage } from './components/workspaces/admin/AdminProofsPage';
 import { AdminSecurityPage } from './components/workspaces/admin/AdminSecurityPage';
+import { CeoGuardedRoute } from './components/auth/CeoGuardedRoute';
+import { CeoStage2Dashboard } from './components/workspaces/ceo/CeoStage2Dashboard';
 
 // Group 5 Phase 2 & 3: Professional Profile & Portfolio Canonical Routes
 import { PrivatePassportPage } from './components/passport/PrivatePassportPage';
@@ -279,6 +281,18 @@ export default function App() {
                     <RoleGuardedRoute allowedRoles={['admin']}>
                       <AdminSecurityPage />
                     </RoleGuardedRoute>
+                  }
+                />
+
+                {/* ========================================================= */}
+                {/* PRIVILEGED CEO / OWNER PLATFORM CONTROL (STAGE 2)         */}
+                {/* ========================================================= */}
+                <Route
+                  path="/ceo"
+                  element={
+                    <CeoGuardedRoute>
+                      <CeoStage2Dashboard />
+                    </CeoGuardedRoute>
                   }
                 />
 

@@ -7,6 +7,7 @@ import { OfflineBanner } from '../common/OfflineBanner';
 import { EmailVerificationBanner } from '../common/EmailVerificationBanner';
 import { ShieldCheck, LogOut } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { AmbientContextualGuidance } from '../ai/AmbientContextualGuidance';
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -133,7 +134,9 @@ export const AppShell: React.FC<AppShellProps> = ({ children }) => {
       <OfflineBanner />
 
       {/* Global Header with Full Navigation Shell */}
-      <GlobalHeader onToggleMobileNav={() => setMobileNavOpen(true)} />
+      <GlobalHeader
+        onToggleMobileNav={() => setMobileNavOpen(true)}
+      />
 
       {/* Unverified Account Reminder Banner (Non-blocking) */}
       <EmailVerificationBanner />
@@ -146,6 +149,8 @@ export const AppShell: React.FC<AppShellProps> = ({ children }) => {
 
       {/* Main Responsive Viewport Container */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 pb-20 lg:pb-6 space-y-6">
+        {/* Ambient Contextual Intelligence Layer (Quiet, In-place, Workflow-Aware) */}
+        {user && <AmbientContextualGuidance />}
         {children}
       </main>
 

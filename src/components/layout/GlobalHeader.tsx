@@ -14,13 +14,16 @@ import {
   Settings,
   Compass,
   Building2,
+  Sparkles,
 } from 'lucide-react';
 
 interface GlobalHeaderProps {
   onToggleMobileNav: () => void;
 }
 
-export const GlobalHeader: React.FC<GlobalHeaderProps> = ({ onToggleMobileNav }) => {
+export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
+  onToggleMobileNav,
+}) => {
   const { user, profile, activeRole, signOut } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const navigate = useNavigate();

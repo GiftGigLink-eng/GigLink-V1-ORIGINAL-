@@ -145,6 +145,9 @@ export const AcceptedHandoffPage: React.FC = () => {
   const [isSubmittingFinalHandover, setIsSubmittingFinalHandover] = useState(false);
   const [isAcceptingFinalHandover, setIsAcceptingFinalHandover] = useState(false);
 
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [overviewErrorCode, setOverviewErrorCode] = useState<'NETWORK' | 'UNAUTHORIZED' | 'UNKNOWN' | null>(null);
+
   // Load Workspace Data
   const loadWorkspace = async (silent = false) => {
     if (!user?.uid) {
@@ -155,11 +158,36 @@ export const AcceptedHandoffPage: React.FC = () => {
     if (!effectiveAppId) {
       if (!silent) setLoading(true);
       else setRefreshing(true);
+      setOverviewError(null);
+      setOverviewErrorCode(null);
       try {
         const contracts = await getContractsForUser(user.uid);
         setUserContracts(contracts);
       } catch (err: any) {
         console.error('Error fetching user contracts overview:', err);
+        const errMsg = (err?.message || String(err)).toLowerCase();
+        const errCode = (err?.code || '').toLowerCase();
+        const isNetwork =
+          errCode.includes('unavailable') ||
+          errCode.includes('deadline-exceeded') ||
+          errMsg.includes('offline') ||
+          errMsg.includes('failed to fetch') ||
+          errMsg.includes('network') ||
+          errMsg.includes('connection lost');
+        const isAuth =
+          errCode.includes('permission-denied') ||
+          errCode.includes('unauthenticated') ||
+          errMsg.includes('permission') ||
+          errMsg.includes('unauthorized');
+        
+        setOverviewErrorCode(isNetwork ? 'NETWORK' : isAuth ? 'UNAUTHORIZED' : 'UNKNOWN');
+        setOverviewError(
+          isNetwork
+            ? 'Connection interrupted. We could not fetch your contracts right now.'
+            : isAuth
+            ? 'You are not authorized to view these contracts.'
+            : 'Failed to load contracts overview.'
+        );
       } finally {
         if (!silent) setLoading(false);
         setRefreshing(false);
@@ -179,10 +207,29 @@ export const AcceptedHandoffPage: React.FC = () => {
     } catch (err: any) {
       console.error('Error loading project workspace:', err);
       if (!silent) {
+        const errMsg = (err?.message || String(err)).toLowerCase();
+        const errCode = (err?.code || '').toLowerCase();
+        const isNetwork =
+          errCode.includes('unavailable') ||
+          errCode.includes('deadline-exceeded') ||
+          errMsg.includes('offline') ||
+          errMsg.includes('failed to fetch') ||
+          errMsg.includes('network') ||
+          errMsg.includes('connection lost');
+        const isAuth =
+          errCode.includes('permission-denied') ||
+          errCode.includes('unauthenticated') ||
+          errMsg.includes('permission') ||
+          errMsg.includes('unauthorized');
+
         setWorkspaceResult({
           success: false,
-          error: err?.message || 'Failed to load project workspace.',
-          errorCode: 'UNKNOWN',
+          error: isNetwork
+            ? 'We could not connect to load the project workspace. Please check your network connection.'
+            : isAuth
+            ? 'You are not authorized to access this project workspace.'
+            : 'Failed to load project workspace.',
+          errorCode: isNetwork ? 'NETWORK' : isAuth ? 'UNAUTHORIZED' : 'UNKNOWN',
         });
       }
     } finally {
@@ -458,8 +505,36 @@ export const AcceptedHandoffPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Contract List or Empty State */}
-        {displayContracts.length === 0 ? (
+        {/* Contract List, Error State, or Empty State */}
+        {overviewError ? (
+          <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-10 sm:p-12 text-center shadow-xs">
+            <div className="w-14 h-14 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-rose-200 dark:border-rose-800/50">
+              <AlertCircle className="w-7 h-7" />
+            </div>
+            <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mb-2">
+              {overviewErrorCode === 'NETWORK'
+                ? 'Connection Interrupted'
+                : overviewErrorCode === 'UNAUTHORIZED'
+                ? 'Access Denied'
+                : 'Unable to Load Contracts'}
+            </h3>
+            <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+              {overviewError}
+            </p>
+            {overviewErrorCode !== 'UNAUTHORIZED' && (
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  onClick={() => loadWorkspace()}
+                  disabled={refreshing}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
+                >
+                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <span>Retry</span>
+                </button>
+              </div>
+            )}
+          </div>
+        ) : displayContracts.length === 0 ? (
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-12 text-center shadow-xs">
             <div className="w-14 h-14 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-indigo-200 dark:border-indigo-800/50">
               <Layers className="w-7 h-7" />
@@ -499,7 +574,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                     <span>Post New Opportunity</span>
                   </Link>
                   <Link
-                    to="/creator/opportunities"
+                    to="/client/opportunities"
                     className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 transition-colors min-h-[44px]"
                   >
                     <span>Manage My Listings</span>
@@ -619,28 +694,69 @@ export const AcceptedHandoffPage: React.FC = () => {
     );
   }
 
-  // 3. Unauthorized / Not Found Error Screen
+  // 3. Truthful Error Screen: Network, Not Found, or Unauthorized
   if (!workspaceResult?.success || !handoffData) {
+    const isNetwork = workspaceResult?.errorCode === 'NETWORK';
+    const isNotFound = workspaceResult?.errorCode === 'NOT_FOUND';
+    const isAuth = workspaceResult?.errorCode === 'UNAUTHORIZED';
+
+    const title = isNetwork
+      ? 'Connection Interrupted'
+      : isNotFound
+      ? 'Workspace Not Found'
+      : isAuth
+      ? 'Access Denied'
+      : 'Unable to Load Workspace';
+
+    const message = isNetwork
+      ? (workspaceResult?.error || 'We could not connect to load the project workspace. Please check your network connection and try again.')
+      : isNotFound
+      ? (workspaceResult?.error || 'The requested project workspace or application does not exist or has been removed.')
+      : isAuth
+      ? (workspaceResult?.error || 'You do not have permission to access this project workspace.')
+      : (workspaceResult?.error || 'Failed to load project workspace. Please try again.');
+
     return (
       <div className="max-w-3xl mx-auto px-4 py-16">
         <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-8 sm:p-12 text-center shadow-xs">
           <div className="w-16 h-16 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-5 border border-rose-200 dark:border-rose-800/50">
-            <AlertCircle className="w-8 h-8" />
+            {isNetwork ? <RefreshCw className="w-8 h-8" /> : isAuth ? <Lock className="w-8 h-8" /> : <AlertCircle className="w-8 h-8" />}
           </div>
           <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-2">
-            Access Denied
+            {title}
           </h2>
           <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 max-w-lg mx-auto leading-relaxed">
-            {workspaceResult?.error ||
-              'You are not authorized to access this project workspace, or the application does not exist.'}
+            {message}
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
+            {isNetwork && (
+              <button
+                onClick={() => loadWorkspace()}
+                disabled={loading || refreshing}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing || loading ? 'animate-spin' : ''}`} />
+                <span>Retry</span>
+              </button>
+            )}
             <Link
               to="/opportunities"
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors min-h-[44px]"
+              className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl ${
+                isNetwork
+                  ? 'border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-50'
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700'
+              } text-xs font-semibold transition-colors min-h-[44px]`}
             >
               <span>Explore Marketplace</span>
             </Link>
+            {isNotFound ? (
+              <Link
+                to="/my-applications"
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-semibold hover:bg-slate-50 transition-colors min-h-[44px]"
+              >
+                <span>My Applications</span>
+              </Link>
+            ) : null}
           </div>
         </div>
       </div>
@@ -2081,7 +2197,7 @@ export const AcceptedHandoffPage: React.FC = () => {
               to={`/p/${handoffData.applicantId}`}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline min-h-[44px]"
             >
               <span>View Talent Trust Passport</span>
               <ExternalLink className="w-3 h-3" />
@@ -2116,15 +2232,21 @@ export const AcceptedHandoffPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Coordination Guidelines */}
-            <div className="p-3.5 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/30 border border-indigo-100 dark:border-indigo-900/40 space-y-2 text-xs text-indigo-950 dark:text-indigo-200">
-              <div className="flex items-center gap-1.5 font-semibold">
+            {/* Authorized Contact & Coordination Guidelines */}
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800/80 space-y-2 text-xs">
+              {handoffData.creatorEmail && (
+                <div className="flex items-center justify-between text-slate-600 dark:text-slate-400">
+                  <span className="text-slate-400">Authorized Email:</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    {handoffData.creatorEmail}
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 font-semibold text-indigo-950 dark:text-indigo-200">
                 <MessageSquare className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                <span>Kickoff & Communication Channel</span>
+                <span>Kickoff Channel:</span>
+                <code className="font-mono text-indigo-600 dark:text-indigo-400 font-bold ml-auto">{contract?.conversationId}</code>
               </div>
-              <p className="text-[11px] leading-relaxed text-indigo-800 dark:text-indigo-300">
-                Authoritative communication channel reference: <code className="font-mono text-indigo-600 dark:text-indigo-400 font-bold">{contract?.conversationId}</code>
-              </p>
             </div>
           </div>
 
@@ -2133,7 +2255,7 @@ export const AcceptedHandoffPage: React.FC = () => {
               to={`/p/${handoffData.opportunityCreatorId}`}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline min-h-[44px]"
             >
               <span>View Client Public Passport</span>
               <ExternalLink className="w-3 h-3" />

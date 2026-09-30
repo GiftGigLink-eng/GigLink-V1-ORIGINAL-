@@ -188,6 +188,7 @@ export const AddProjectProofModal: React.FC<AddProjectProofModalProps> = ({
             <SearchableSkillSelector
               selectedSkills={skillsUsed}
               onChange={setSkillsUsed}
+              hideLabel
             />
           </div>
 

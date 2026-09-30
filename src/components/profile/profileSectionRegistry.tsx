@@ -11,7 +11,9 @@ export type ProfileSectionKey =
   | 'experience'
   | 'education'
   | 'certifications'
-  | 'social_links';
+  | 'social_links'
+  | 'client_opportunities'
+  | 'client_hiring_focus';
 
 export interface ProfileSectionDefinition {
   key: ProfileSectionKey;
@@ -50,12 +52,9 @@ export const PERSONA_SECTION_ORDER: Record<UserPersona, ProfileSectionKey[]> = {
   ],
   client: [
     'about',
-    'projects',
-    'experience',
-    'skills',
+    'client_hiring_focus',
+    'client_opportunities',
     'social_links',
-    'education',
-    'certifications',
   ],
   organization_admin: [
     'about',
@@ -79,12 +78,9 @@ export const PERSONA_SECTION_ORDER: Record<UserPersona, ProfileSectionKey[]> = {
   ],
   creator: [
     'about',
-    'projects',
-    'experience',
-    'skills',
+    'client_hiring_focus',
+    'client_opportunities',
     'social_links',
-    'education',
-    'certifications',
   ],
   enterprise: [
     'about',

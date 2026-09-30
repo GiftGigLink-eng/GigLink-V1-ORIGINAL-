@@ -414,6 +414,7 @@ export const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                 <SearchableSkillSelector
                   selectedSkills={skillsUsed}
                   onChange={setSkillsUsed}
+                  hideLabel
                 />
               </div>
 

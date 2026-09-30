@@ -4,6 +4,7 @@
  * auth OTP endpoints, and authoritative Stripe Payments, Escrow & Webhook handlers (Phase 4).
  */
 
+import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import { GoogleGenAI } from '@google/genai';
@@ -25,6 +26,20 @@ import {
   setTalentPayoutAccount,
 } from './src/lib/financialLedgerService';
 import { getContract } from './src/lib/contractService';
+import {
+  getAuthoritativeCeoOverview,
+  getAuthoritativeCeoMembers,
+  getAuthoritativeCeoFinancials,
+  getAuthoritativeCeoActivity,
+  getAuthoritativeCeoSystemHealth,
+  recordRuntimeAuthFailure,
+  recordRuntimeWebhookFailure,
+} from './src/server/ceoMetricsService';
+import { recomputeAndSyncPublicTrustPassport } from './src/server/serverTrustScoreService';
+import { getAdminFirestore } from './src/server/firebaseAdmin';
+import { buildSanitizedAiContext } from './src/server/aiContextBuilder';
+import { defaultIlAiService } from './src/server/aiService';
+import { IlAiGuidanceRequest } from './src/server/aiContextDTOs';
 
 async function startServer() {
   const app = express();
@@ -107,6 +122,7 @@ async function startServer() {
 
         return res.status(200).json({ received: true });
       } catch (err: any) {
+        recordRuntimeWebhookFailure();
         console.error('[Stripe Webhook] Error processing event:', err);
         return res.status(500).json({ error: 'Failed to process webhook event.' });
       }
@@ -244,6 +260,184 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error verifying OTP:', err);
       return res.status(500).json({ error: 'Failed to verify code. Please try again.' });
+    }
+  });
+
+  // =========================================================================
+  // PRIVILEGED CEO / OWNER AUTHORIZATION LAYER (SERVER-AUTHORITATIVE)
+  // =========================================================================
+
+  interface VerifiedAuthUser {
+    uid: string;
+    email: string;
+    emailVerified: boolean;
+    claims: Record<string, any>;
+    isCeo: boolean;
+  }
+
+  /**
+   * Cryptographically validates Firebase ID tokens server-side using Google Identity Toolkit.
+   * Ensures account validity, signature verification, expiration, and claims authenticity.
+   */
+  async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedAuthUser | null> {
+    const firebaseApiKey = (firebaseConfig as any)?.apiKey;
+    if (!idToken || !firebaseApiKey) return null;
+
+    try {
+      const resp = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${firebaseApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        }
+      );
+
+      if (!resp.ok) {
+        return null;
+      }
+
+      const data: any = await resp.json();
+      if (!data?.users || !data.users[0]) {
+        return null;
+      }
+
+      const u = data.users[0];
+      let parsedClaims: Record<string, any> = {};
+      if (u.customAttributes) {
+        try {
+          parsedClaims = JSON.parse(u.customAttributes);
+        } catch {
+          parsedClaims = {};
+        }
+      }
+
+      const uid = (u.localId || '').trim();
+      const email = (u.email || '').trim().toLowerCase();
+      const emailVerified = Boolean(u.emailVerified);
+
+      // Enforce strict CEO authorization:
+      // Sole authoritative anchor: Cryptographically verified Firebase UID must match process.env.CEO_UID
+      // Fail closed: If process.env.CEO_UID is missing, empty, or invalid, isCeo is strictly false.
+      const configuredCeoUid = (process.env.CEO_UID || '')
+        .replace(/^["']|["']$/g, '')
+        .trim();
+
+      const isCeo = Boolean(configuredCeoUid && uid && uid === configuredCeoUid);
+
+      return {
+        uid,
+        email,
+        emailVerified,
+        claims: parsedClaims,
+        isCeo,
+      };
+    } catch (err) {
+      console.error('[verifyFirebaseIdToken] Error during token verification:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Express middleware to enforce server-authoritative CEO authorization.
+   */
+  const requireCeoAuthorization = async (req: Request, res: Response, next: express.NextFunction) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        recordRuntimeAuthFailure();
+        return res.status(401).json({ error: 'Unauthorized: Missing or malformed authorization header.' });
+      }
+
+      const idToken = authHeader.substring(7).trim();
+      if (!idToken) {
+        recordRuntimeAuthFailure();
+        return res.status(401).json({ error: 'Unauthorized: Empty token provided.' });
+      }
+
+      const authUser = await verifyFirebaseIdToken(idToken);
+      if (!authUser) {
+        recordRuntimeAuthFailure();
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired token.' });
+      }
+
+      if (!authUser.isCeo) {
+        recordRuntimeAuthFailure();
+        return res.status(403).json({ error: 'Forbidden: Account does not have CEO authorization.' });
+      }
+
+      (req as any).ceoUser = authUser;
+      return next();
+    } catch (err) {
+      recordRuntimeAuthFailure();
+      console.error('[requireCeoAuthorization] Error in middleware:', err);
+      return res.status(500).json({ error: 'Internal server error during authorization verification.' });
+    }
+  };
+
+  // CEO Auth-Check endpoint: validates caller's authorization server-side
+  app.get('/api/ceo/auth-check', requireCeoAuthorization, (req: Request, res: Response) => {
+    const ceoUser = (req as any).ceoUser as VerifiedAuthUser;
+    return res.json({
+      isCeo: true,
+      uid: ceoUser.uid,
+      email: ceoUser.email,
+      authorizedAt: new Date().toISOString(),
+    });
+  });
+
+  // Stage 2: CEO Executive Platform Overview (Strictly READ-ONLY)
+  app.get('/api/ceo/overview', requireCeoAuthorization, async (req: Request, res: Response) => {
+    try {
+      const overview = await getAuthoritativeCeoOverview();
+      return res.json(overview);
+    } catch (err: any) {
+      console.error('[CEO Overview] Failed to fetch platform overview:', err);
+      return res.status(500).json({ error: 'Failed to retrieve platform overview metrics.' });
+    }
+  });
+
+  // Stage 2: CEO Authoritative Member Directory (Strictly READ-ONLY)
+  app.get('/api/ceo/members', requireCeoAuthorization, async (req: Request, res: Response) => {
+    try {
+      const members = await getAuthoritativeCeoMembers();
+      return res.json(members);
+    } catch (err: any) {
+      console.error('[CEO Members] Failed to fetch member directory:', err);
+      return res.status(500).json({ error: 'Failed to retrieve member directory.' });
+    }
+  });
+
+  // Stage 2: CEO Executive Financials & Escrow Ledger (Strictly READ-ONLY)
+  app.get('/api/ceo/financials', requireCeoAuthorization, async (req: Request, res: Response) => {
+    try {
+      const financials = await getAuthoritativeCeoFinancials();
+      return res.json(financials);
+    } catch (err: any) {
+      console.error('[CEO Financials] Failed to fetch platform financials:', err);
+      return res.status(500).json({ error: 'Failed to retrieve platform financial metrics.' });
+    }
+  });
+
+  // Stage 2: CEO Sanitized Platform Activity (Strictly READ-ONLY)
+  app.get('/api/ceo/activity', requireCeoAuthorization, async (req: Request, res: Response) => {
+    try {
+      const activity = await getAuthoritativeCeoActivity();
+      return res.json(activity);
+    } catch (err: any) {
+      console.error('[CEO Activity] Failed to fetch platform activity:', err);
+      return res.status(500).json({ error: 'Failed to retrieve platform activity.' });
+    }
+  });
+
+  // Stage 2: CEO Platform System Health (Strictly READ-ONLY)
+  app.get('/api/ceo/system-health', requireCeoAuthorization, async (req: Request, res: Response) => {
+    try {
+      const health = await getAuthoritativeCeoSystemHealth();
+      return res.json(health);
+    } catch (err: any) {
+      console.error('[CEO System Health] Failed to fetch system health:', err);
+      return res.status(500).json({ error: 'Failed to retrieve system health.' });
     }
   });
 
@@ -562,9 +756,169 @@ async function startServer() {
     }
   });
 
-  // 8. Advisory AI endpoint (Server-side Gemini API call)
+  // 8. Server-Authoritative Trust Score & Projection Recalculation
+  app.post('/api/trust-passport/recalculate', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized: Missing or malformed authorization token.' });
+      }
+
+      const idToken = authHeader.substring(7).trim();
+      const verifiedUser = await verifyFirebaseIdToken(idToken);
+      if (!verifiedUser) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token.' });
+      }
+
+      const targetUid = (req.body?.targetUid || verifiedUser.uid).trim();
+
+      // Only self or CEO/admin can recalculate
+      if (targetUid !== verifiedUser.uid && !verifiedUser.isCeo) {
+        return res.status(403).json({ error: 'Forbidden: You can only recalculate your own Trust Passport.' });
+      }
+
+      const result = await recomputeAndSyncPublicTrustPassport(
+        targetUid,
+        verifiedUser.uid,
+        verifiedUser.emailVerified
+      );
+
+      return res.json(result);
+    } catch (err: any) {
+      console.error('[Trust Score Sync] Error recalculating trust passport:', err);
+      return res.status(500).json({ error: err.message || 'Failed to recalculate Trust Passport.' });
+    }
+  });
+
+  // 8B. Server-Authoritative Review of Identity Verification
+  app.post('/api/verifications/review-identity', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized: Missing or malformed authorization token.' });
+      }
+
+      const idToken = authHeader.substring(7).trim();
+      const verifiedUser = await verifyFirebaseIdToken(idToken);
+      if (!verifiedUser) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token.' });
+      }
+
+      const { verificationId, subjectUserId, status, rejectionReason } = req.body || {};
+      if (!verificationId || !subjectUserId || !status) {
+        return res.status(400).json({ error: 'Missing required parameters: verificationId, subjectUserId, status.' });
+      }
+
+      if (status !== 'verified' && status !== 'rejected') {
+        return res.status(400).json({ error: 'Invalid status. Must be "verified" or "rejected".' });
+      }
+
+      // 1. Strict anti-self-verification check: User CANNOT review their own verification request
+      if (verifiedUser.uid === subjectUserId) {
+        return res.status(403).json({ error: 'Forbidden: You cannot review your own verification submission.' });
+      }
+
+      // 2. Strict verifier authorization: Must be CEO, token admin, or token verifier
+      const isPrivilegedVerifier =
+        verifiedUser.isCeo ||
+        verifiedUser.claims?.role === 'admin' ||
+        verifiedUser.claims?.admin === true ||
+        verifiedUser.claims?.role === 'verifier' ||
+        verifiedUser.claims?.verifier === true;
+
+      if (!isPrivilegedVerifier) {
+        return res.status(403).json({
+          error: 'Forbidden: Only authorized verifiers and platform admins can review verifications.',
+        });
+      }
+
+      const adminDb = getAdminFirestore();
+      const now = new Date().toISOString();
+
+      // 3. Update verifications document with verifier attribution and review outcome
+      const verifRef = adminDb.collection('verifications').doc(verificationId);
+      await verifRef.set(
+        {
+          status,
+          reviewedAt: now,
+          verifierUid: verifiedUser.uid,
+          verifierId: verifiedUser.uid,
+          rejectionReason: rejectionReason || null,
+        },
+        { merge: true }
+      );
+
+      // 4. Update subject's trustPassports with server authority
+      const subjectPassportRef = adminDb.collection('trustPassports').doc(subjectUserId);
+      await subjectPassportRef.set(
+        {
+          identityVerified: status === 'verified',
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+
+      // 5. Update subject's users document with server authority
+      const subjectUserRef = adminDb.collection('users').doc(subjectUserId);
+      await subjectUserRef.set(
+        {
+          identityVerified: status === 'verified',
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+
+      // 6. Automatically recalculate and sync subject's public trust passport projection
+      const syncResult = await recomputeAndSyncPublicTrustPassport(subjectUserId, verifiedUser.uid);
+
+      return res.json({
+        success: true,
+        status,
+        subjectUserId,
+        verificationId,
+        trustScore: syncResult.trustScore,
+        trustTier: syncResult.trustTier,
+      });
+    } catch (err: any) {
+      console.error('[Verification Review] Error reviewing verification:', err);
+      return res.status(500).json({ error: err.message || 'Failed to review verification.' });
+    }
+  });
+
+  // In-memory rate limiting for IL AI endpoints (15 requests per minute per authenticated UID)
+  const aiRateLimitMap = new Map<string, { count: number; windowStart: number }>();
+  const checkAiRateLimit = (uid: string, limit = 15, windowMs = 60000): boolean => {
+    const now = Date.now();
+    const record = aiRateLimitMap.get(uid);
+    if (!record || now - record.windowStart > windowMs) {
+      aiRateLimitMap.set(uid, { count: 1, windowStart: now });
+      return true;
+    }
+    if (record.count >= limit) {
+      return false;
+    }
+    record.count++;
+    return true;
+  };
+
+  // 9. Advisory AI endpoint (Compatibility route - Secured with ID-Token authentication)
   app.post('/api/ai/advisory', async (req: Request, res: Response) => {
     try {
+      // SEC-AI-01: Require cryptographic Firebase ID token verification
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized: Missing authorization bearer token.' });
+      }
+      const idToken = authHeader.substring(7).trim();
+      const verifiedUser = await verifyFirebaseIdToken(idToken);
+      if (!verifiedUser) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token.' });
+      }
+
+      if (!checkAiRateLimit(verifiedUser.uid, 10)) {
+        return res.status(429).json({ error: 'Rate limit exceeded for AI Advisory. Please try again in 1 minute.' });
+      }
+
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
         return res.status(500).json({ error: 'GEMINI_API_KEY environment variable is missing.' });
@@ -598,8 +952,9 @@ Generate a structured JSON response strictly adhering to this JSON format:
 Respond with raw valid JSON only, without markdown formatting blocks.
 `;
 
+      const modelName = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: modelName,
         contents: prompt,
       });
 
@@ -613,6 +968,55 @@ Respond with raw valid JSON only, without markdown formatting blocks.
       return res.status(500).json({
         error: 'Failed to generate advisory response.',
         details: error?.message || String(error),
+      });
+    }
+  });
+
+  // 10. GigLink Intelligence Layer (IL AI) V1 Authenticated Gateway
+  app.post('/api/ai/v1/guidance', async (req: Request, res: Response) => {
+    try {
+      // 1. Bearer Token Verification
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Unauthorized: Missing or malformed authorization token.' });
+      }
+
+      const idToken = authHeader.substring(7).trim();
+      const verifiedUser = await verifyFirebaseIdToken(idToken);
+      if (!verifiedUser) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired authentication token.' });
+      }
+
+      // 2. Per-User Rate Limiting (15 requests / min)
+      if (!checkAiRateLimit(verifiedUser.uid, 15)) {
+        return res.status(429).json({
+          error: 'Intelligence Layer request limit reached. Please wait a moment before asking again.',
+        });
+      }
+
+      const payload = req.body as IlAiGuidanceRequest;
+      if (!payload || typeof payload !== 'object') {
+        return res.status(400).json({ error: 'Invalid request payload.' });
+      }
+
+      // 3. Server-authoritative context building with strict entity authorization
+      const sanitizedContext = await buildSanitizedAiContext(verifiedUser.uid, payload);
+
+      // 4. Generate structured guidance via Gemini with safety guardrails
+      const guidance = await defaultIlAiService.generateGuidance(
+        sanitizedContext,
+        payload.message
+      );
+
+      return res.json({
+        success: true,
+        guidance,
+      });
+    } catch (err: any) {
+      console.error('[IL AI V1 Gateway] Error processing guidance request:', err);
+      return res.status(500).json({
+        error: 'Unable to generate intelligence guidance at this time.',
+        details: err?.message || 'Internal error',
       });
     }
   });

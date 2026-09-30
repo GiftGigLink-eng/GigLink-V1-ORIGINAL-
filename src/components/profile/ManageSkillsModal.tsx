@@ -118,6 +118,7 @@ export const ManageSkillsModal: React.FC<ManageSkillsModalProps> = ({
             <SearchableSkillSelector
               selectedSkills={skillsList.map((s) => s.name)}
               onChange={handleSelectedNamesChange}
+              hideLabel
             />
           </div>
 

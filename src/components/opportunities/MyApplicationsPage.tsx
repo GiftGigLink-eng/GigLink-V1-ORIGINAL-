@@ -16,6 +16,7 @@ import {
   Ban,
   Shield,
   Compass,
+  RefreshCw,
 } from 'lucide-react';
 
 export const MyApplicationsPage: React.FC = () => {
@@ -25,15 +26,45 @@ export const MyApplicationsPage: React.FC = () => {
   const [applications, setApplications] = useState<OpportunityApplication[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<{
+    message: string;
+    isNetwork: boolean;
+    isAuth: boolean;
+  } | null>(null);
 
   const fetchApplications = async () => {
     if (!user) return;
     setLoading(true);
+    setLoadError(null);
     try {
       const data = await getMyApplications(user.uid);
       setApplications(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load my applications:', err);
+      const errMsg = (err?.message || String(err)).toLowerCase();
+      const errCode = (err?.code || '').toLowerCase();
+      const isNetwork =
+        errCode.includes('unavailable') ||
+        errCode.includes('deadline-exceeded') ||
+        errMsg.includes('offline') ||
+        errMsg.includes('failed to fetch') ||
+        errMsg.includes('network') ||
+        errMsg.includes('connection lost');
+      const isAuth =
+        errCode.includes('permission-denied') ||
+        errCode.includes('unauthenticated') ||
+        errMsg.includes('permission') ||
+        errMsg.includes('unauthorized');
+
+      setLoadError({
+        message: isNetwork
+          ? 'Connection interrupted. We could not fetch your applications right now.'
+          : isAuth
+          ? 'You are not authorized to view these applications.'
+          : 'Failed to load your applications. Please try again.',
+        isNetwork,
+        isAuth,
+      });
     } finally {
       setLoading(false);
     }
@@ -119,6 +150,33 @@ export const MyApplicationsPage: React.FC = () => {
               className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 animate-pulse h-36"
             />
           ))}
+        </div>
+      ) : loadError ? (
+        <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-10 sm:p-14 text-center shadow-xs">
+          <div className="w-14 h-14 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-rose-200 dark:border-rose-800/50">
+            <AlertCircle className="w-7 h-7" />
+          </div>
+          <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mb-2">
+            {loadError.isNetwork
+              ? 'Connection Interrupted'
+              : loadError.isAuth
+              ? 'Access Denied'
+              : 'Unable to Load Applications'}
+          </h3>
+          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+            {loadError.message}
+          </p>
+          {!loadError.isAuth && (
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={() => fetchApplications()}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Retry</span>
+              </button>
+            </div>
+          )}
         </div>
       ) : applications.length === 0 ? (
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-10 sm:p-14 text-center shadow-xs">

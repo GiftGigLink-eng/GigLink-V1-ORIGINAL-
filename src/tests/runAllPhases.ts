@@ -16,6 +16,13 @@ import { runPhase9CSaltedSelectiveDisclosureTests } from './phase9CSaltedSelecti
 import { runPhase9CZKRangeProofTests } from './phase9CZKRangeProof.test';
 import { runPhase9C4Tests } from './phase9C4ConsoleAndUI.test';
 import { runProfileEnhancementTests } from './profileEnhancements.test';
+import { runServerTrustScoreTestSuite } from './serverTrustScore.test';
+import { runTrustAuthorityRemediationTests } from './trustAuthorityRemediation.test';
+import { runCeoStage1SecuritySuite } from './ceoAuthorizationStage1.test';
+import { runCeoStage2TestSuite } from './ceoStage2.test';
+import { runClientProfileUnificationTests } from './clientProfileUnification.test';
+import { runPhase2HiringAndAvatarTests } from './phase2HiringAndAvatar.test';
+import { runPhase3ClientPublicIdentityTests } from './phase3ClientPublicIdentity.test';
 import {
   canSubmitMilestone,
   canReviewMilestone,
@@ -26,7 +33,9 @@ import {
   persistContract,
   getContract,
   normalizeContractData,
+  setContractWriterForTesting,
 } from '../lib/contractService';
+import { setLedgerWriterForTesting } from '../lib/financialLedgerService';
 import { deriveContractNotifications } from '../lib/notificationService';
 import { GigLinkContract, ContractMilestone } from '../types';
 
@@ -39,6 +48,11 @@ async function runAll() {
   let grandPassed = 0;
   let grandFailed = 0;
 
+  // Use test writer stubs during offline regression test execution
+  setContractWriterForTesting(async () => {});
+  setLedgerWriterForTesting(async () => {});
+
+  try {
   // -----------------------------------------------------------------
   // PHASE 1: Contract Formation, Mutual Scope Lock & Digital Signatures
   // -----------------------------------------------------------------
@@ -433,6 +447,69 @@ async function runAll() {
   console.log('');
 
   // -------------------------------------------------------------
+  // CLIENT/CREATOR PROFESSIONAL IDENTITY UNIFICATION
+  // -------------------------------------------------------------
+  const clientUnify = await runClientProfileUnificationTests();
+  grandTotal += clientUnify.total;
+  grandPassed += clientUnify.passed;
+  grandFailed += clientUnify.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE 2: CLIENT HIRING IDENTITY & UNIVERSAL AVATAR SUITE
+  // -------------------------------------------------------------
+  const phase2Suite = runPhase2HiringAndAvatarTests();
+  grandTotal += phase2Suite.total;
+  grandPassed += phase2Suite.passed;
+  grandFailed += phase2Suite.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE 3: CLIENT PUBLIC PROFESSIONAL IDENTITY & PROJECTION SUITE
+  // -------------------------------------------------------------
+  const phase3Suite = await runPhase3ClientPublicIdentityTests();
+  grandTotal += phase3Suite.total;
+  grandPassed += phase3Suite.passed;
+  grandFailed += phase3Suite.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // SERVER-AUTHORITATIVE TRUST SCORE & PROJECTION SUITE
+  // -------------------------------------------------------------
+  const serverTrust = runServerTrustScoreTestSuite();
+  grandTotal += serverTrust.total;
+  grandPassed += serverTrust.passed;
+  grandFailed += serverTrust.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE 1 TRUST AUTHORITY SECURITY REMEDIATION SUITE
+  // -------------------------------------------------------------
+  const remediationSuite = await runTrustAuthorityRemediationTests();
+  grandTotal += remediationSuite.total;
+  grandPassed += remediationSuite.passed;
+  grandFailed += remediationSuite.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // CEO DASHBOARD STAGE 1: PRIVILEGED AUTHORIZATION & SECURITY
+  // -------------------------------------------------------------
+  const ceoStage1 = await runCeoStage1SecuritySuite();
+  grandTotal += ceoStage1.total;
+  grandPassed += ceoStage1.passed;
+  grandFailed += ceoStage1.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // CEO DASHBOARD STAGE 2: READ-ONLY EXECUTIVE INTELLIGENCE
+  // -------------------------------------------------------------
+  const ceoStage2 = await runCeoStage2TestSuite();
+  grandTotal += ceoStage2.total;
+  grandPassed += ceoStage2.passed;
+  grandFailed += ceoStage2.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
   // ADVERSARIAL VERIFICATION & PENETRATION AUDIT
   // -------------------------------------------------------------
   console.log('--- ADVERSARIAL SECURITY & PENETRATION AUDIT ---');
@@ -456,6 +533,11 @@ async function runAll() {
   console.log(`SKIPPED:      0`);
   console.log(`STATUS:       ${grandFailed === 0 ? 'ALL GREEN' : 'RED'}`);
   console.log('====================================================');
+
+  } finally {
+    setContractWriterForTesting(null);
+    setLedgerWriterForTesting(null);
+  }
 
   if (grandFailed > 0) {
     process.exit(1);

@@ -45,13 +45,27 @@ service cloud.firestore {
     }
 
     // --- Schemas & Structural Validators ---
+    function isValidPhotoUrl(url) {
+      return url is string &&
+             url.size() <= 2048 &&
+             (url == '' || (
+               url.matches('^https://.+') &&
+               !url.matches('^http://.*') &&
+               !url.matches('^javascript:.*') &&
+               !url.matches('^data:.*') &&
+               !url.matches('^blob:.*') &&
+               !url.matches('^file:.*')
+             ));
+    }
+
     function isValidUser(data) {
       return data.uid is string && data.uid == request.auth.uid &&
              data.email is string && data.email.size() <= 256 &&
              data.displayName is string && data.displayName.size() <= 100 &&
              data.activePersona is string &&
              (data.activePersona == 'learner' || data.activePersona == 'partner' ||
-              data.activePersona == 'client' || data.activePersona == 'organization_admin');
+              data.activePersona == 'client' || data.activePersona == 'organization_admin') &&
+             (!('photoURL' in data) || data.photoURL == null || isValidPhotoUrl(data.photoURL));
     }
 
     function isValidPassport(data) {
@@ -273,9 +287,20 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isOwner(userId) || isVerifier() || isAdmin();
       allow list: if isAdmin();
-      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming());
-      allow update: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) &&
-                       incoming().uid == existing().uid;
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUser(incoming()) &&
+                       (!('identityVerified' in incoming()) || incoming().identityVerified == false) &&
+                       (!('isIdentityVerified' in incoming()) || incoming().isIdentityVerified == false);
+      allow update: if isValidId(userId) && (
+                       isAdmin() ||
+                       (isOwner(userId) && isValidUser(incoming()) &&
+                        incoming().uid == existing().uid &&
+                        (!('identityVerified' in incoming()) ||
+                         (!('identityVerified' in existing()) && incoming().identityVerified == false) ||
+                         incoming().identityVerified == existing().identityVerified) &&
+                        (!('isIdentityVerified' in incoming()) ||
+                         (!('isIdentityVerified' in existing()) && incoming().isIdentityVerified == false) ||
+                         incoming().isIdentityVerified == existing().isIdentityVerified))
+                     );
     }
 
     // ==========================================
@@ -287,8 +312,8 @@ service cloud.firestore {
       allow create: if isOwner(passportId) && isValidId(passportId) && isValidPassport(incoming()) &&
                        incoming().identityVerified == false;
       allow update: if isValidId(passportId) && (
-        // Admin / Trusted backend process can update identityVerified & calculated metrics
-        (isAdmin() && incoming().userId == existing().userId) ||
+        // Admin or authorized Verifier can update identityVerified & calculated metrics
+        ((isAdmin() || isVerifier()) && incoming().userId == existing().userId) ||
         // Owner can update user-controlled fields, but CANNOT mutate identityVerified
         (isOwner(passportId) && isValidPassport(incoming()) &&
          incoming().userId == existing().userId &&
@@ -304,24 +329,11 @@ service cloud.firestore {
       allow get: if true;
       allow list: if false;
 
-      // Creation by owner: Authoritative fields must initialize unverified/0 unless set by admin
-      allow create: if isOwner(passportId) && isValidId(passportId) && isValidPublicPassport(incoming()) && (
-        (incoming().userId == request.auth.uid &&
-         incoming().trustScore == 0 &&
-         incoming().trustTier == 'Unverified' &&
-         incoming().identityVerified == false) ||
-        isAdmin()
-      );
-
-      // Updates by owner: CANNOT mutate authoritative score/verification fields
-      allow update: if isValidId(passportId) && (
-        isAdmin() ||
-        (isOwner(passportId) && isValidPublicPassport(incoming()) &&
-         incoming().userId == existing().userId &&
-         incoming().trustScore == existing().trustScore &&
-         incoming().trustTier == existing().trustTier &&
-         incoming().identityVerified == existing().identityVerified)
-      );
+      // Creation & Updates: Strict Server-Authoritative Path (Admin only)
+      // Normal clients cannot directly manipulate public projection fields
+      // (trustScore, trustTier, identityVerified, photoURL, hiringInterests, etc.)
+      allow create: if isAdmin();
+      allow update: if isAdmin();
 
       // Owner can take passport down from public view (delete projection)
       allow delete: if isOwner(passportId) || isAdmin();

@@ -14,7 +14,8 @@ import { AvailabilitySection } from './AvailabilitySection';
 import { ServicesSection } from './ServicesSection';
 import { PotentialTrajectoryCard } from './PotentialTrajectoryCard';
 import { getOrderedProfileSections } from './profileSectionRegistry';
-import { CreatorProfileView } from './CreatorProfileView';
+import { ClientOpportunitiesSection } from './ClientOpportunitiesSection';
+import { ClientHiringFocusSection } from './ClientHiringFocusSection';
 
 // Modals
 import { EditProfileModal } from './EditProfileModal';
@@ -47,7 +48,9 @@ export const MyProfilePage: React.FC = () => {
     activeRole,
     activePersona,
     loading,
+    updatePassportVisibility,
     updatePassportDetails,
+    updateProfilePicture,
     addProjectProof,
     updateProjectProof,
     deleteProjectProof,
@@ -109,6 +112,11 @@ export const MyProfilePage: React.FC = () => {
     structuredLocation: any;
     socialLinks: any;
     isPublic: boolean;
+    photoURL?: string;
+    hiringInterests?: string[];
+    talentTypes?: string[];
+    customHiringNeed?: string;
+    publishHiringFocus?: boolean;
   }) => {
     try {
       await updatePassportDetails({
@@ -116,7 +124,19 @@ export const MyProfilePage: React.FC = () => {
         bio: updates.bio,
         structuredLocation: updates.structuredLocation,
         socialLinks: updates.socialLinks,
+        ...(updates.hiringInterests !== undefined ? { hiringInterests: updates.hiringInterests } : {}),
+        ...(updates.talentTypes !== undefined ? { talentTypes: updates.talentTypes } : {}),
+        ...(updates.customHiringNeed !== undefined ? { customHiringNeed: updates.customHiringNeed } : {}),
+        ...(updates.publishHiringFocus !== undefined ? { publishHiringFocus: updates.publishHiringFocus } : {}),
       });
+
+      if (typeof updates.photoURL === 'string' && updates.photoURL !== (profile?.photoURL || '')) {
+        await updateProfilePicture(updates.photoURL);
+      }
+
+      if (typeof updates.isPublic === 'boolean' && updates.isPublic !== passport?.isPublic) {
+        await updatePassportVisibility(updates.isPublic);
+      }
       showToast('Profile updated successfully!', 'success');
     } catch (err: any) {
       showToast(err.message || 'Failed to update profile.', 'error');
@@ -345,6 +365,24 @@ export const MyProfilePage: React.FC = () => {
     />
   );
 
+  const clientOpportunitiesComp = (
+    <ClientOpportunitiesSection
+      key="client_opportunities"
+      userId={user?.uid}
+    />
+  );
+
+  const clientHiringFocusComp = (
+    <ClientHiringFocusSection
+      key="client_hiring_focus"
+      hiringInterests={unifiedProfile.hiringInterests}
+      talentTypes={unifiedProfile.talentTypes}
+      customHiringNeed={unifiedProfile.customHiringNeed}
+      isEditable={true}
+      onEdit={() => setShowEditProfileModal(true)}
+    />
+  );
+
   // Declarative persona-ordered layout resolution
   const renderPersonaOrderedSections = () => {
     const sectionsMap = {
@@ -358,109 +396,127 @@ export const MyProfilePage: React.FC = () => {
       education: educationComp,
       certifications: certificationsComp,
       social_links: socialLinksComp,
+      client_opportunities: clientOpportunitiesComp,
+      client_hiring_focus: clientHiringFocusComp,
     };
 
     return getOrderedProfileSections(activePersona, sectionsMap);
   };
 
-  const isCreatorRole = activeRole === 'creator' || activePersona === 'client';
-
   return (
     <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
-      {/* If Creator role is active, render CreatorProfileView */}
-      {isCreatorRole ? (
-        <CreatorProfileView onEditProfile={() => setShowEditProfileModal(true)} />
-      ) : (
-        <>
-          {/* Primary Profile Header */}
-          <ProfileHeader
-            profileData={unifiedProfile}
-            onOpenEditModal={() => setShowEditProfileModal(true)}
-            onOpenBreakdownModal={() => setShowTrustBreakdownModal(true)}
-          />
+      {/* Primary Profile Header - Unified across all personas */}
+      <ProfileHeader
+        profileData={unifiedProfile}
+        onOpenEditModal={() => setShowEditProfileModal(true)}
+        onOpenBreakdownModal={() => setShowTrustBreakdownModal(true)}
+      />
 
-          {/* Persona Context Banner */}
-          {activePersona === 'learner' && (
-            <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
-                  <GraduationCap className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
-                    Learner Profile Lens Active
-                  </h3>
-                  <p className="text-[11px] text-indigo-700 dark:text-indigo-300">
-                    Prioritizing skill mastery, coursework milestones, and early verifiable project proofs.
-                  </p>
-                </div>
-              </div>
-              <Link
-                to="/opportunities"
-                className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0"
-              >
-                <span>Explore Entry Gigs</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
+      {/* Persona Context Banners */}
+      {activePersona === 'learner' && (
+        <div className="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+              <GraduationCap className="w-4 h-4" />
             </div>
-          )}
-
-          {activePersona === 'partner' && (
-            <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                  <Briefcase className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
-                    Professional Partner Lens Active
-                  </h3>
-                  <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
-                    Emphasizing verified client deliverables, repositories, live demos, and demonstrated work history.
-                  </p>
-                </div>
-              </div>
-              <Link
-                to="/opportunities"
-                className="inline-flex items-center gap-1 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:underline shrink-0"
-              >
-                <span>Browse Opportunities</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
+            <div>
+              <h3 className="text-xs font-bold text-indigo-950 dark:text-indigo-200">
+                Learner Profile Lens Active
+              </h3>
+              <p className="text-[11px] text-indigo-700 dark:text-indigo-300">
+                Prioritizing skill mastery, coursework milestones, and early verifiable project proofs.
+              </p>
             </div>
-          )}
-
-          {activePersona === 'organization_admin' && (
-            <div className="p-4 rounded-2xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0">
-                  <Building2 className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-purple-950 dark:text-purple-200">
-                    Organization Administrator Active
-                  </h3>
-                  <p className="text-[11px] text-purple-700 dark:text-purple-300">
-                    Managing institutional identity, company verifications, and verified team members.
-                  </p>
-                </div>
-              </div>
-              {unifiedProfile.organizationId && (
-                <Link
-                  to={`/org/${unifiedProfile.organizationId}`}
-                  className="inline-flex items-center gap-1 text-xs font-bold text-purple-700 dark:text-purple-300 hover:underline shrink-0"
-                >
-                  <span>View Organization</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </Link>
-              )}
-            </div>
-          )}
-
-          {/* Persona-Ordered Modular Sections */}
-          <div className="space-y-6">{renderPersonaOrderedSections()}</div>
-        </>
+          </div>
+          <Link
+            to="/opportunities"
+            className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:underline shrink-0"
+          >
+            <span>Explore Entry Gigs</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
       )}
+
+      {activePersona === 'partner' && (
+        <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+              <Briefcase className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
+                Professional Partner Lens Active
+              </h3>
+              <p className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                Emphasizing verified client deliverables, repositories, live demos, and demonstrated work history.
+              </p>
+            </div>
+          </div>
+          <Link
+            to="/opportunities"
+            className="inline-flex items-center gap-1 text-xs font-bold text-emerald-600 dark:text-emerald-400 hover:underline shrink-0"
+          >
+            <span>Browse Opportunities</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      )}
+
+      {activePersona === 'client' && (
+        <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+              <Compass className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-amber-950 dark:text-amber-200">
+                Client Profile Lens Active
+              </h3>
+              <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                Highlighting studio identity, posted opportunities, and collaboration requirements for verified talent.
+              </p>
+            </div>
+          </div>
+          <Link
+            to="/opportunities/create"
+            className="inline-flex items-center gap-1 text-xs font-bold text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+          >
+            <span>Post New Opportunity</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      )}
+
+      {activePersona === 'organization_admin' && (
+        <div className="p-4 rounded-2xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0">
+              <Building2 className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-purple-950 dark:text-purple-200">
+                Organization Administrator Active
+              </h3>
+              <p className="text-[11px] text-purple-700 dark:text-purple-300">
+                Managing institutional identity, company verifications, and verified team members.
+              </p>
+            </div>
+          </div>
+          {unifiedProfile.organizationId && (
+            <Link
+              to={`/org/${unifiedProfile.organizationId}`}
+              className="inline-flex items-center gap-1 text-xs font-bold text-purple-700 dark:text-purple-300 hover:underline shrink-0"
+            >
+              <span>View Organization</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          )}
+        </div>
+      )}
+
+      {/* Persona-Ordered Modular Sections */}
+      <div className="space-y-6">{renderPersonaOrderedSections()}</div>
 
       {/* Modals */}
       <EditProfileModal

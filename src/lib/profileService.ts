@@ -27,6 +27,8 @@ import {
   WorkAvailability,
   PartnerServiceOffering,
   PotentialTrajectoryIndicator,
+  UserPersona,
+  normalizeCanonicalPersona,
 } from '../types';
 import { calculateTrustScore, calculateProfileCompleteness, calculatePotentialTrajectory } from './trustScore';
 import { getSkillByName } from './catalogue/skills';
@@ -63,6 +65,119 @@ export function removeUndefinedFields<T extends Record<string, any>>(obj: T): T 
   return cleanObj as T;
 }
 
+export interface ImageUrlValidationResult {
+  isValid: boolean;
+  error?: string;
+  sanitizedUrl?: string;
+}
+
+/**
+ * Validates and sanitizes a profile picture image URL.
+ * Strictly enforces HTTPS protocol and rejects dangerous schemes (javascript:, data:, blob:, file:, http:)
+ * as well as localhost, private IP ranges, and malformed inputs.
+ */
+export function validateProfileImageUrl(
+  rawUrl: string | null | undefined,
+  options: { allowEmpty?: boolean } = { allowEmpty: false }
+): ImageUrlValidationResult {
+  if (!rawUrl || rawUrl.trim() === '') {
+    if (options.allowEmpty) {
+      return { isValid: true, sanitizedUrl: '' };
+    }
+    return { isValid: false, error: 'Image URL cannot be empty.' };
+  }
+
+  const trimmed = rawUrl.trim();
+
+  if (trimmed.length > 2048) {
+    return { isValid: false, error: 'Image URL exceeds maximum permissible length (2048 characters).' };
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith('javascript:') ||
+    lower.startsWith('data:') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('file:') ||
+    lower.startsWith('http:')
+  ) {
+    return {
+      isValid: false,
+      error: 'Insecure or invalid URL protocol. Only secure HTTPS image URLs are permitted.',
+    };
+  }
+
+  if (!lower.startsWith('https://')) {
+    return {
+      isValid: false,
+      error: 'Profile picture URL must strictly begin with https://',
+    };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { isValid: false, error: 'Malformed URL syntax.' };
+  }
+
+  if (parsed.protocol !== 'https:') {
+    return { isValid: false, error: 'Only HTTPS URLs are allowed.' };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+
+  // Reject localhost and local domain names
+  if (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.local') ||
+    hostname.endsWith('.internal') ||
+    hostname === '0.0.0.0'
+  ) {
+    return { isValid: false, error: 'Localhost and local network addresses are forbidden.' };
+  }
+
+  // Reject IPv4 loopback & private IP ranges
+  const ipv4Regex = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const match = hostname.match(ipv4Regex);
+  if (match) {
+    const octet1 = parseInt(match[1], 10);
+    const octet2 = parseInt(match[2], 10);
+    const octet3 = parseInt(match[3], 10);
+    const octet4 = parseInt(match[4], 10);
+
+    if (octet1 > 255 || octet2 > 255 || octet3 > 255 || octet4 > 255) {
+      return { isValid: false, error: 'Invalid IP address format.' };
+    }
+
+    if (
+      octet1 === 127 || // Loopback
+      octet1 === 10 || // Class A private
+      octet1 === 0 || // Current network
+      (octet1 === 172 && octet2 >= 16 && octet2 <= 31) || // Class B private
+      (octet1 === 192 && octet2 === 168) || // Class C private
+      (octet1 === 169 && octet2 === 254) // Link-local
+    ) {
+      return { isValid: false, error: 'Private and loopback IP addresses are forbidden.' };
+    }
+  }
+
+  // Reject IPv6 loopback & private addresses
+  if (
+    hostname === '[::1]' ||
+    hostname === '::1' ||
+    hostname.startsWith('fe80:') ||
+    hostname.startsWith('[fe80:') ||
+    hostname.startsWith('fc00:') ||
+    hostname.startsWith('[fc00:')
+  ) {
+    return { isValid: false, error: 'Private IPv6 addresses are forbidden.' };
+  }
+
+  return { isValid: true, sanitizedUrl: trimmed };
+}
+
 /**
  * Normalizes an array of skills (which could be legacy string names or SkillItem objects)
  * into strongly-typed canonical SkillItem objects.
@@ -95,7 +210,12 @@ export function normalizeSocialLinks(
   return {
     github: passportLinks?.github || profile?.githubUrl || undefined,
     linkedin: passportLinks?.linkedin || profile?.linkedinUrl || undefined,
-    portfolio: passportLinks?.portfolio || profile?.portfolioUrl || undefined,
+    portfolio:
+      passportLinks?.portfolio ||
+      (passportLinks as any)?.website ||
+      profile?.portfolioUrl ||
+      (profile as any)?.website ||
+      undefined,
     twitter: passportLinks?.twitter || undefined,
     other: passportLinks?.other || undefined,
   };
@@ -175,9 +295,16 @@ export function getUnifiedProfileData(
   // 12. Potential Trajectory (Derived verified growth & milestone velocity)
   const potentialTrajectory: PotentialTrajectoryIndicator = calculatePotentialTrajectory(passport, profile);
 
-  // 13. Verification & Trust Signals
+  // 13. Client Hiring Identity (Hiring interests, talent types, custom needs)
+  const hiringInterests: string[] = passport?.hiringInterests || (profile as any)?.hiringInterests || [];
+  const talentTypes: string[] = passport?.talentTypes || (profile as any)?.talentTypes || [];
+  const customHiringNeed: string = passport?.customHiringNeed || (profile as any)?.customHiringNeed || '';
+  const publishHiringFocus: boolean =
+    passport?.publishHiringFocus === true || (profile as any)?.publishHiringFocus === true;
+
+  // 14. Verification & Trust Signals
   const isPublic = passport?.isPublic ?? false;
-  const identityVerified = passport?.identityVerified === true || profile?.identityVerified === true;
+  const identityVerified = passport?.identityVerified === true;
 
   const trustScoreResult = calculateTrustScore(passport, profile, isEmailVerified);
   const profileCompleteness = calculateProfileCompleteness(profile, passport);
@@ -201,6 +328,10 @@ export function getUnifiedProfileData(
     availability,
     partnerServices,
     potentialTrajectory,
+    hiringInterests,
+    talentTypes,
+    customHiringNeed,
+    publishHiringFocus,
     isPublic,
     identityVerified,
     trustScore: trustScoreResult.totalScore,
@@ -298,6 +429,18 @@ export function sanitizePublicPassportProjection(
   const trustCalc = calculateTrustScore(passport, profile, isEmailVerified);
   const unified = getUnifiedProfileData(profile, passport, isEmailVerified);
 
+  // Authoritative Persona Resolution:
+  // Derived strictly from authoritative UserProfile, falling back to passport if profile is null.
+  // Normalized strictly to one of the 4 canonical UserPersonas ('learner' | 'partner' | 'client' | 'organization_admin').
+  const rawPersona =
+    profile?.activePersona ||
+    (profile as any)?.persona ||
+    (passport as any)?.activePersona ||
+    (passport as any)?.persona ||
+    profile?.activeRole ||
+    (passport as any)?.activeRole;
+  const canonicalPersona: UserPersona = normalizeCanonicalPersona(rawPersona);
+
   // Filter out private drafts - only published/completed projects are visible publicly
   const publicProjects = (unified.projects || [])
     .filter((p) => p.status !== 'draft')
@@ -306,6 +449,8 @@ export function sanitizePublicPassportProjection(
   const rawDoc: Record<string, any> = {
     userId: passport.userId || (passport as any).uid || profile?.uid || '',
     uid: passport.userId || (passport as any).uid || profile?.uid || '',
+    persona: canonicalPersona,
+    activePersona: canonicalPersona,
     displayName: unified.displayName,
     headline: unified.headline,
     bio: unified.bio,
@@ -334,8 +479,43 @@ export function sanitizePublicPassportProjection(
     updatedAt: passport.updatedAt || new Date().toISOString(),
   };
 
-  if (unified.photoURL) {
-    rawDoc.photoURL = unified.photoURL;
+  if (unified.photoURL && unified.photoURL.trim().length > 0) {
+    rawDoc.photoURL = unified.photoURL.trim();
+  }
+
+  // Hiring Focus Privacy Guard:
+  // Must ONLY be included if effectivePassport.isPublic === true AND publishHiringFocus === true.
+  // Safe default: if publishHiringFocus is false, missing, or undefined, hiring fields are strictly omitted.
+  const isPublicPassport = passport.isPublic === true;
+  const publishHiringFocus =
+    passport.publishHiringFocus === true || (profile as any)?.publishHiringFocus === true;
+
+  if (isPublicPassport && publishHiringFocus) {
+    const rawInterests = passport.hiringInterests || unified.hiringInterests;
+    if (Array.isArray(rawInterests) && rawInterests.length > 0) {
+      const sanitized = rawInterests
+        .filter((i): i is string => typeof i === 'string' && i.trim().length > 0)
+        .map((i) => i.trim().slice(0, 100))
+        .slice(0, 10);
+      if (sanitized.length > 0) {
+        rawDoc.hiringInterests = sanitized;
+      }
+    }
+    const rawTalents = passport.talentTypes || unified.talentTypes;
+    if (Array.isArray(rawTalents) && rawTalents.length > 0) {
+      const sanitized = rawTalents
+        .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+        .map((t) => t.trim().slice(0, 100))
+        .slice(0, 10);
+      if (sanitized.length > 0) {
+        rawDoc.talentTypes = sanitized;
+      }
+    }
+    const rawNeed = passport.customHiringNeed || unified.customHiringNeed;
+    if (typeof rawNeed === 'string' && rawNeed.trim().length > 0) {
+      rawDoc.customHiringNeed = rawNeed.trim().slice(0, 1000);
+    }
+    rawDoc.publishHiringFocus = true;
   }
   if (unified.organizationId) {
     rawDoc.organizationId = unified.organizationId;
@@ -384,6 +564,10 @@ export function buildPassportUpdatePayload(
     | 'portfolioUrl'
     | 'availability'
     | 'partnerServices'
+    | 'hiringInterests'
+    | 'talentTypes'
+    | 'customHiringNeed'
+    | 'publishHiringFocus'
   >>
 ): Partial<TrustPassport> {
   const now = new Date().toISOString();
@@ -413,10 +597,21 @@ export function buildPassportUpdatePayload(
   }
 
   if ('skills' in updates && updates.skills !== undefined) {
-    payload.skills = updates.skills;
+    const existingSkillMap = new Map(
+      (currentPassport?.skills || []).map((s) => [s.id || s.name.toLowerCase(), s])
+    );
+    payload.skills = updates.skills.map((s) => {
+      const existing = existingSkillMap.get(s.id || s.name.toLowerCase());
+      const verifiedCount = existing?.verifiedCount ? Number(existing.verifiedCount) : 0;
+      return {
+        ...s,
+        verifiedCount,
+        verified: verifiedCount > 0,
+      };
+    });
   }
   if ('projects' in updates && updates.projects !== undefined) {
-    // Preserve existing verified status & verifier attribution from current passport
+    // Preserve existing verified status & verifier attribution from current passport ONLY if genuinely verified
     const existingMap = new Map((currentPassport?.projects || []).map((p) => [p.id, p]));
     payload.projects = updates.projects.map((p) => {
       const existing = existingMap.get(p.id);
@@ -431,7 +626,10 @@ export function buildPassportUpdatePayload(
       }
       return {
         ...p,
-        verificationStatus: (existing?.verificationStatus || p.verificationStatus || 'unverified') as any,
+        verificationStatus: (existing?.verificationStatus === 'pending' ? 'pending' : 'unverified') as any,
+        verifierUid: undefined,
+        verifierName: undefined,
+        verifiedAt: undefined,
       };
     });
   }
@@ -446,11 +644,53 @@ export function buildPassportUpdatePayload(
     payload.education = updates.education;
   }
   if ('certifications' in updates && updates.certifications !== undefined) {
-    payload.certifications = updates.certifications;
-    payload.certificates = updates.certifications; // keep aliases synced
+    const existingCertMap = new Map(
+      (currentPassport?.certifications || []).map((c) => [c.id || (c as any).credentialId, c])
+    );
+    payload.certifications = updates.certifications.map((c) => {
+      const existing = existingCertMap.get(c.id || (c as any).credentialId);
+      if (existing && existing.verificationStatus === 'verified') {
+        return {
+          ...c,
+          verificationStatus: 'verified' as const,
+          verifierUid: existing.verifierUid,
+          verifierName: existing.verifierName,
+          verifiedAt: existing.verifiedAt,
+        };
+      }
+      return {
+        ...c,
+        verificationStatus: 'unverified' as const,
+        verifierUid: undefined,
+        verifierName: undefined,
+        verifiedAt: undefined,
+      };
+    });
+    payload.certificates = payload.certifications; // keep aliases synced
   } else if ('certificates' in updates && updates.certificates !== undefined) {
-    payload.certifications = updates.certificates;
-    payload.certificates = updates.certificates;
+    const existingCertMap = new Map(
+      (currentPassport?.certifications || []).map((c) => [c.id || (c as any).credentialId, c])
+    );
+    payload.certifications = updates.certificates.map((c) => {
+      const existing = existingCertMap.get(c.id || (c as any).credentialId);
+      if (existing && existing.verificationStatus === 'verified') {
+        return {
+          ...c,
+          verificationStatus: 'verified' as const,
+          verifierUid: existing.verifierUid,
+          verifierName: existing.verifierName,
+          verifiedAt: existing.verifiedAt,
+        };
+      }
+      return {
+        ...c,
+        verificationStatus: 'unverified' as const,
+        verifierUid: undefined,
+        verifierName: undefined,
+        verifiedAt: undefined,
+      };
+    });
+    payload.certificates = payload.certifications;
   }
   if ('socialLinks' in updates && updates.socialLinks !== undefined) {
     payload.socialLinks = updates.socialLinks;
@@ -466,6 +706,29 @@ export function buildPassportUpdatePayload(
   }
   if ('partnerServices' in updates && updates.partnerServices !== undefined) {
     payload.partnerServices = updates.partnerServices;
+  }
+
+  if ('hiringInterests' in updates && updates.hiringInterests !== undefined) {
+    payload.hiringInterests = Array.isArray(updates.hiringInterests)
+      ? updates.hiringInterests
+          .filter((item): item is string => typeof item === 'string')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+  }
+  if ('talentTypes' in updates && updates.talentTypes !== undefined) {
+    payload.talentTypes = Array.isArray(updates.talentTypes)
+      ? updates.talentTypes
+          .filter((item): item is string => typeof item === 'string')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : [];
+  }
+  if ('customHiringNeed' in updates && updates.customHiringNeed !== undefined) {
+    payload.customHiringNeed = typeof updates.customHiringNeed === 'string' ? updates.customHiringNeed.trim() : '';
+  }
+  if ('publishHiringFocus' in updates && updates.publishHiringFocus !== undefined) {
+    payload.publishHiringFocus = updates.publishHiringFocus === true;
   }
 
   return removeUndefinedFields(payload);

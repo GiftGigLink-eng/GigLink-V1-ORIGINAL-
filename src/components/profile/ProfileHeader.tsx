@@ -28,6 +28,11 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
   onOpenEditModal,
   onOpenBreakdownModal,
 }) => {
+  const [imageError, setImageError] = React.useState(false);
+
+  React.useEffect(() => {
+    setImageError(false);
+  }, [profileData.photoURL]);
   const getPersonaBadge = (persona: UserPersona) => {
     switch (persona) {
       case 'learner':
@@ -88,11 +93,12 @@ export const ProfileHeader: React.FC<ProfileHeaderProps> = ({
         <div className="flex flex-col sm:flex-row items-start gap-4 sm:gap-5 flex-1">
           {/* Avatar Container */}
           <div className="relative shrink-0">
-            {profileData.photoURL ? (
+            {profileData.photoURL && !imageError ? (
               <img
                 src={profileData.photoURL}
                 alt={profileData.displayName}
                 referrerPolicy="no-referrer"
+                onError={() => setImageError(true)}
                 className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shadow-md"
               />
             ) : (

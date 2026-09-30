@@ -85,7 +85,18 @@ export interface HandoffWorkspaceResult {
   isApplicant?: boolean;
   isCreator?: boolean;
   error?: string;
-  errorCode?: 'NOT_FOUND' | 'NOT_ACCEPTED' | 'UNAUTHORIZED' | 'UNKNOWN';
+  errorCode?: 'NOT_FOUND' | 'NOT_ACCEPTED' | 'UNAUTHORIZED' | 'NETWORK' | 'UNKNOWN';
+}
+
+export type HandoffWorkspaceLoader = (
+  applicationId: string,
+  currentUserId: string,
+  userIsOrgAdmin?: boolean
+) => Promise<HandoffWorkspaceResult>;
+let customHandoffLoader: HandoffWorkspaceLoader | null = null;
+
+export function setHandoffWorkspaceLoaderForTesting(loader: HandoffWorkspaceLoader | null): void {
+  customHandoffLoader = loader;
 }
 
 /**
@@ -102,6 +113,9 @@ export async function getHandoffWorkspace(
   currentUserId: string,
   userIsOrgAdmin = false
 ): Promise<HandoffWorkspaceResult> {
+  if (customHandoffLoader) {
+    return await customHandoffLoader(applicationId, currentUserId, userIsOrgAdmin);
+  }
   if (!applicationId || !currentUserId) {
     return {
       success: false,
@@ -177,6 +191,7 @@ export async function getHandoffWorkspace(
       }
     } catch (contractErr) {
       console.warn('[HandoffService] Contract resolution notice:', contractErr);
+      throw contractErr;
     }
 
     // Map contract milestones into OpportunityMilestones for backward-compatible views
@@ -236,10 +251,34 @@ export async function getHandoffWorkspace(
     };
   } catch (error: any) {
     console.error('[HandoffService] Error loading handoff workspace:', error);
+    const errMsg = (error?.message || String(error)).toLowerCase();
+    const errCode = (error?.code || '').toLowerCase();
+
+    const isNetwork =
+      errCode.includes('unavailable') ||
+      errCode.includes('deadline-exceeded') ||
+      errMsg.includes('unavailable') ||
+      errMsg.includes('offline') ||
+      errMsg.includes('failed to fetch') ||
+      errMsg.includes('network') ||
+      errMsg.includes('connection lost');
+
+    const isAuth =
+      errCode.includes('permission-denied') ||
+      errCode.includes('unauthenticated') ||
+      errMsg.includes('permission_denied') ||
+      errMsg.includes('permission-denied') ||
+      errMsg.includes('missing or insufficient permissions') ||
+      errMsg.includes('unauthorized');
+
     return {
       success: false,
-      error: error?.message || 'Failed to load handoff workspace.',
-      errorCode: 'UNKNOWN',
+      error: isNetwork
+        ? 'We could not connect to load the project workspace. Please check your network connection.'
+        : isAuth
+        ? 'You are not authorized to view this collaboration handoff workspace.'
+        : 'Failed to load project workspace due to an unexpected error.',
+      errorCode: isNetwork ? 'NETWORK' : isAuth ? 'UNAUTHORIZED' : 'UNKNOWN',
     };
   }
 }

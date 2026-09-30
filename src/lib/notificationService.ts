@@ -28,6 +28,28 @@ import { getContractsForUser } from './contractService';
 const STORAGE_KEY_PREFIX = 'giglink_notifications_read_';
 
 /**
+ * Canonical Persona-Aware Notification Workspace Destination Resolver (Phase 1 Remediation)
+ * Maps user persona to their authoritative canonical workspace dashboard.
+ * Corrects MED-03 and Organization Admin routing.
+ */
+export function getNotificationWorkspaceDestination(activePersona?: string): { path: string; label: string } {
+  switch (activePersona) {
+    case 'client':
+    case 'creator':
+      return { path: '/client/dashboard', label: 'Go to Client Workspace' };
+    case 'organization_admin':
+    case 'enterprise':
+      return { path: '/enterprise/dashboard', label: 'Go to Organization Workspace' };
+    case 'partner':
+      return { path: '/talent/dashboard', label: 'Go to Partner Workspace' };
+    case 'learner':
+    case 'talent':
+    default:
+      return { path: '/talent/dashboard', label: 'Go to Learner Workspace' };
+  }
+}
+
+/**
  * Retrieves the set of read notification IDs for a given user from local storage.
  */
 export function getReadNotificationIds(userId: string): Set<string> {
@@ -85,7 +107,11 @@ export function deriveApplicantNotification(
   opportunityTitle?: string,
   isRead: boolean = false
 ): AppNotification | null {
-  const oppTitle = opportunityTitle || app.opportunityTitle || 'Opportunity';
+  const oppTitle = (opportunityTitle && opportunityTitle !== 'Opportunity')
+    ? opportunityTitle
+    : (app.opportunityTitle && app.opportunityTitle.trim().length > 0)
+    ? app.opportunityTitle
+    : opportunityTitle || 'Opportunity';
   const targetUrl = '/my-applications';
   const updatedAt = app.updatedAt || app.submittedAt || new Date().toISOString();
 
@@ -181,7 +207,11 @@ export function deriveCreatorNotification(
   opportunityTitle?: string,
   isRead: boolean = false
 ): AppNotification | null {
-  const oppTitle = opportunityTitle || app.opportunityTitle || 'your opportunity';
+  const oppTitle = (opportunityTitle && opportunityTitle !== 'your opportunity' && opportunityTitle !== 'Opportunity')
+    ? opportunityTitle
+    : (app.opportunityTitle && app.opportunityTitle.trim().length > 0)
+    ? app.opportunityTitle
+    : opportunityTitle || 'your opportunity';
   const targetUrl = `/opportunities/${app.opportunityId}/applications`;
   const creatorId = app.opportunityCreatorId;
   if (!creatorId) return null;
@@ -314,7 +344,7 @@ export function deriveContractNotifications(
     // A. Talent submitted deliverable -> Creator notification
     if (isCreator && (m.reviewState === 'submitted' || m.reviewState === 'in_review') && m.submission) {
       results.push({
-        id: `milestone_${m.id}_submitted_${m.submittedAt || contract.updatedAt}`,
+        id: `milestone_${contract.id}_${m.id}_submitted`,
         userId: currentUserId,
         type: 'milestone_submitted',
         category: 'contract',
@@ -331,7 +361,7 @@ export function deriveContractNotifications(
     // B. Creator requested revisions -> Talent notification
     if (isTalent && m.reviewState === 'revision_requested') {
       results.push({
-        id: `milestone_${m.id}_revision_${m.revisionCount}_${m.reviewedAt || contract.updatedAt}`,
+        id: `milestone_${contract.id}_${m.id}_revision_${m.revisionCount}`,
         userId: currentUserId,
         type: 'milestone_revision_requested',
         category: 'contract',
@@ -348,7 +378,7 @@ export function deriveContractNotifications(
     // C. Creator approved milestone -> Talent notification
     if (isTalent && m.reviewState === 'approved') {
       results.push({
-        id: `milestone_${m.id}_approved_${m.approvedAt || contract.updatedAt}`,
+        id: `milestone_${contract.id}_${m.id}_approved`,
         userId: currentUserId,
         type: 'milestone_approved',
         category: 'contract',
@@ -366,7 +396,7 @@ export function deriveContractNotifications(
   // 3. Final Handover Submitted -> Creator notification
   if (isCreator && contract.finalHandover?.status === 'submitted') {
     results.push({
-      id: `final_handover_${contract.id}_submitted_${contract.finalHandover.submittedAt || contract.updatedAt}`,
+      id: `final_handover_${contract.id}_submitted`,
       userId: currentUserId,
       type: 'final_handover_submitted',
       category: 'contract',
@@ -383,7 +413,7 @@ export function deriveContractNotifications(
   // 4. Final Handover Accepted / Project Completed -> Both parties
   if (contract.status === 'completed') {
     results.push({
-      id: `project_${contract.id}_completed_${contract.completedAt || contract.updatedAt}`,
+      id: `project_${contract.id}_completed`,
       userId: currentUserId,
       type: 'project_completed',
       category: 'contract',
@@ -409,7 +439,7 @@ export function deriveContractNotifications(
 
         if (isCounterparty) {
           results.push({
-            id: `cr_${cr.id}_pending_${cr.createdAt}`,
+            id: `cr_${cr.id}_pending`,
             userId: currentUserId,
             type: 'change_request_created',
             category: 'contract',
@@ -428,7 +458,7 @@ export function deriveContractNotifications(
       if (cr.status === 'approved' && cr.approvedAt) {
         if (currentUserId === cr.requestedBy) {
           results.push({
-            id: `cr_${cr.id}_approved_${cr.approvedAt}`,
+            id: `cr_${cr.id}_approved`,
             userId: currentUserId,
             type: 'change_request_approved',
             category: 'contract',
@@ -447,7 +477,7 @@ export function deriveContractNotifications(
       if (cr.status === 'rejected' && cr.rejectedAt) {
         if (currentUserId === cr.requestedBy) {
           results.push({
-            id: `cr_${cr.id}_rejected_${cr.rejectedAt}`,
+            id: `cr_${cr.id}_rejected`,
             userId: currentUserId,
             type: 'change_request_rejected',
             category: 'contract',
@@ -470,7 +500,7 @@ export function deriveContractNotifications(
 
         if (isCounterparty) {
           results.push({
-            id: `cr_${cr.id}_withdrawn_${cr.withdrawnAt}`,
+            id: `cr_${cr.id}_withdrawn`,
             userId: currentUserId,
             type: 'change_request_withdrawn',
             category: 'contract',
@@ -493,7 +523,7 @@ export function deriveContractNotifications(
     if (m.paymentState === 'held' && m.fundedAt) {
       if (isTalent) {
         results.push({
-          id: `financial_held_${m.id}_${m.fundedAt}`,
+          id: `financial_held_${contract.id}_${m.id}`,
           userId: currentUserId,
           type: 'milestone_payment_held',
           category: 'financial',
@@ -507,7 +537,7 @@ export function deriveContractNotifications(
         });
       } else if (isCreator) {
         results.push({
-          id: `financial_funded_${m.id}_${m.fundedAt}`,
+          id: `financial_funded_${contract.id}_${m.id}`,
           userId: currentUserId,
           type: 'milestone_funded',
           category: 'financial',
@@ -525,7 +555,7 @@ export function deriveContractNotifications(
     if (m.paymentState === 'released' && m.releasedAt) {
       if (isTalent) {
         results.push({
-          id: `financial_released_${m.id}_${m.releasedAt}`,
+          id: `financial_released_${contract.id}_${m.id}`,
           userId: currentUserId,
           type: 'milestone_payment_released',
           category: 'financial',
@@ -539,7 +569,7 @@ export function deriveContractNotifications(
         });
       } else if (isCreator) {
         results.push({
-          id: `financial_released_creator_${m.id}_${m.releasedAt}`,
+          id: `financial_released_creator_${contract.id}_${m.id}`,
           userId: currentUserId,
           type: 'milestone_payment_released',
           category: 'financial',
@@ -556,7 +586,7 @@ export function deriveContractNotifications(
     // C. Escrow Refunded -> Notify both parties
     if (m.paymentState === 'refunded' && m.refundedAt) {
       results.push({
-        id: `financial_refunded_${m.id}_${m.refundedAt}`,
+        id: `financial_refunded_${contract.id}_${m.id}`,
         userId: currentUserId,
         type: 'refund_completed',
         category: 'financial',
@@ -572,7 +602,7 @@ export function deriveContractNotifications(
     // D. Additional Funding Required -> Notify Client
     if (isCreator && m.requiredFundingAmount && m.fundedAmount && m.requiredFundingAmount > m.fundedAmount) {
       results.push({
-        id: `financial_additional_funding_${m.id}_${contract.updatedAt}`,
+        id: `financial_additional_funding_${contract.id}_${m.id}`,
         userId: currentUserId,
         type: 'additional_funding_required',
         category: 'financial',
@@ -672,7 +702,9 @@ export async function fetchDerivedNotifications(userUid: string): Promise<AppNot
     for (const docSnap of applicantSnap.docs) {
       const data = docSnap.data() as OpportunityApplication;
       const app = { ...data, id: docSnap.id };
-      const oppTitle = await getOpportunityTitle(app.opportunityId);
+      const oppTitle = (app.opportunityTitle && app.opportunityTitle.trim().length > 0)
+        ? app.opportunityTitle
+        : await getOpportunityTitle(app.opportunityId);
       const notif = deriveApplicantNotification(app, oppTitle, false);
       if (notif) {
         notif.read = readSet.has(notif.id);
@@ -689,7 +721,9 @@ export async function fetchDerivedNotifications(userUid: string): Promise<AppNot
     for (const docSnap of creatorSnap.docs) {
       const data = docSnap.data() as OpportunityApplication & { opportunityCreatorId?: string };
       const app = { ...data, id: docSnap.id, opportunityCreatorId: userUid };
-      const oppTitle = await getOpportunityTitle(app.opportunityId);
+      const oppTitle = (app.opportunityTitle && app.opportunityTitle.trim().length > 0)
+        ? app.opportunityTitle
+        : await getOpportunityTitle(app.opportunityId);
       const notif = deriveCreatorNotification(app, oppTitle, false);
       if (notif) {
         notif.read = readSet.has(notif.id);
@@ -791,13 +825,50 @@ export function subscribeToDerivedNotifications(
 
   const oppTitlesMap = new Map<string, string>();
 
+  const resolveMissingOpportunityTitles = async (
+    apps: (OpportunityApplication & { opportunityTitle?: string })[]
+  ) => {
+    const oppIdsToFetch: string[] = [];
+    apps.forEach((app) => {
+      if (app.opportunityTitle && app.opportunityTitle.trim().length > 0) {
+        oppTitlesMap.set(app.opportunityId, app.opportunityTitle.trim());
+      } else if (app.opportunityId && !oppTitlesMap.has(app.opportunityId)) {
+        oppIdsToFetch.push(app.opportunityId);
+      }
+    });
+
+    if (oppIdsToFetch.length === 0) return;
+
+    let resolvedCount = 0;
+    await Promise.all(
+      oppIdsToFetch.map(async (oppId) => {
+        try {
+          const snap = await getDoc(doc(db, 'opportunities', oppId));
+          if (snap.exists()) {
+            const title = snap.data().title;
+            if (title) {
+              oppTitlesMap.set(oppId, title);
+              resolvedCount++;
+            }
+          }
+        } catch {
+          // Fallback to Opportunity
+        }
+      })
+    );
+
+    if (resolvedCount > 0) {
+      rebuildNotifications();
+    }
+  };
+
   const rebuildNotifications = () => {
     const readSet = getReadNotificationIds(userUid);
     const notifs: AppNotification[] = [];
 
     // Applicant notifications
     applicantApps.forEach((app) => {
-      const title = oppTitlesMap.get(app.opportunityId) || 'Opportunity';
+      const title = oppTitlesMap.get(app.opportunityId) || app.opportunityTitle || 'Opportunity';
       const n = deriveApplicantNotification(app, title, false);
       if (n) {
         n.read = readSet.has(n.id);
@@ -807,7 +878,7 @@ export function subscribeToDerivedNotifications(
 
     // Creator notifications
     creatorApps.forEach((app) => {
-      const title = oppTitlesMap.get(app.opportunityId) || 'Opportunity';
+      const title = oppTitlesMap.get(app.opportunityId) || app.opportunityTitle || 'your opportunity';
       const n = deriveCreatorNotification(app, title, false);
       if (n) {
         n.read = readSet.has(n.id);
@@ -854,6 +925,7 @@ export function subscribeToDerivedNotifications(
         id: d.id,
       }));
       rebuildNotifications();
+      resolveMissingOpportunityTitles(applicantApps);
     },
     (err) => {
       console.warn('[NotificationService] Applicant listener warning:', err.message);
@@ -869,6 +941,7 @@ export function subscribeToDerivedNotifications(
         opportunityCreatorId: userUid,
       }));
       rebuildNotifications();
+      resolveMissingOpportunityTitles(creatorApps);
     },
     (err) => {
       console.warn('[NotificationService] Creator listener warning:', err.message);

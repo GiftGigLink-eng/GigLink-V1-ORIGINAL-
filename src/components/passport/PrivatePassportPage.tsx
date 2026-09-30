@@ -60,6 +60,12 @@ export const PrivatePassportPage: React.FC = () => {
   const isPublic = passport?.isPublic ?? false;
   const publicUrl = `${window.location.origin}/p/${user?.uid}`;
 
+  const workspaceRoute = activePersona === 'client'
+    ? '/client/dashboard'
+    : activePersona === 'organization_admin'
+      ? '/org/dashboard'
+      : '/talent/dashboard';
+
   const handleToggleVisibility = async () => {
     if (!user) return;
     setUpdatingVisibility(true);
@@ -85,15 +91,17 @@ export const PrivatePassportPage: React.FC = () => {
         {/* Navigation Breadcrumb */}
         <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
           <div className="flex items-center gap-1.5">
-            <span>GigLink Hub</span>
+            <Link to={workspaceRoute} className="hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+              {activePersona === 'client' ? 'Client Workspace' : activePersona === 'organization_admin' ? 'Organization Workspace' : 'Talent Workspace'}
+            </Link>
             <ChevronRight className="w-3.5 h-3.5" />
             <span className="font-bold text-slate-800 dark:text-white">Private Trust Passport</span>
           </div>
           
           <div className="flex items-center gap-2">
             <Link
-              to="/talent/dashboard"
-              className="text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+              to={workspaceRoute}
+              className="text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 min-h-[44px] flex items-center transition-colors"
             >
               Workspace
             </Link>
