@@ -11,12 +11,16 @@
 
 import { getApps, initializeApp, App } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { getAuth, Auth } from 'firebase-admin/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const TARGET_PROJECT_ID = firebaseConfig.projectId || 'giglink-bf27b';
+export function getTargetProjectId(): string {
+  return process.env.GCLOUD_PROJECT || firebaseConfig.projectId || 'giglink-bf27b';
+}
 
 let adminApp: App | null = null;
 let adminDb: Firestore | null = null;
+let adminAuth: Auth | null = null;
 
 export function getAdminApp(): App {
   if (!adminApp) {
@@ -25,11 +29,19 @@ export function getAdminApp(): App {
       adminApp = existingApps[0];
     } else {
       adminApp = initializeApp({
-        projectId: TARGET_PROJECT_ID,
+        projectId: getTargetProjectId(),
       });
     }
   }
   return adminApp;
+}
+
+export function getAdminAuth(): Auth {
+  if (!adminAuth) {
+    const app = getAdminApp();
+    adminAuth = getAuth(app);
+  }
+  return adminAuth;
 }
 
 export function getAdminFirestore(): Firestore {
@@ -42,8 +54,4 @@ export function getAdminFirestore(): Firestore {
     });
   }
   return adminDb;
-}
-
-export function getTargetProjectId(): string {
-  return TARGET_PROJECT_ID;
 }

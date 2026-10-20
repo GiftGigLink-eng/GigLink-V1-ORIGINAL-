@@ -7,6 +7,8 @@
  * HTML/JSON parsing crashes.
  */
 
+import { auth } from '../config/firebase';
+
 const API_BASE_URL = (import.meta.env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
 export class BackendUnavailableError extends Error {
@@ -20,6 +22,23 @@ export class BackendUnavailableError extends Error {
   }
 }
 
+async function getAuthHeaders(existingHeaders?: Record<string, string>): Promise<Record<string, string>> {
+  const merged: Record<string, string> = { ...existingHeaders };
+  if (!merged.Authorization && !merged.authorization) {
+    try {
+      if (auth?.currentUser) {
+        const token = await auth.currentUser.getIdToken();
+        if (token) {
+          merged.Authorization = `Bearer ${token}`;
+        }
+      }
+    } catch {
+      // Gracefully continue without bearer if offline or unauthenticated
+    }
+  }
+  return merged;
+}
+
 export async function postApi<T = any>(
   endpoint: string,
   body: any,
@@ -28,13 +47,15 @@ export async function postApi<T = any>(
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const url = `${API_BASE_URL}${normalizedEndpoint}`;
 
+  const resolvedHeaders = await getAuthHeaders(headers);
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...headers,
+        ...resolvedHeaders,
       },
       body: JSON.stringify(body),
     });
@@ -84,13 +105,15 @@ export async function getApi<T = any>(
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   const url = `${API_BASE_URL}${normalizedEndpoint}`;
 
+  const resolvedHeaders = await getAuthHeaders(headers);
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        ...headers,
+        ...resolvedHeaders,
       },
     });
   } catch (networkErr: any) {

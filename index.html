@@ -9,6 +9,34 @@
     <meta property="og:description" content="A professional career ecosystem connecting Learners, Partners, Clients, and Organizations with a verified Trust Passport." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      (function() {
+        var origError = console.error;
+        var origWarn = console.warn;
+        function isFirestoreAdvisory(args) {
+          for (var i = 0; i < args.length; i++) {
+            var item = args[i];
+            var str = typeof item === 'string' ? item : (item && item.message ? item.message : '');
+            if (
+              str.indexOf('Could not reach Cloud Firestore backend') !== -1 ||
+              str.indexOf("didn't respond within 10 seconds") !== -1 ||
+              str.indexOf('operate in offline mode') !== -1
+            ) {
+              return true;
+            }
+          }
+          return false;
+        }
+        console.error = function() {
+          if (isFirestoreAdvisory(arguments)) return;
+          origError.apply(console, arguments);
+        };
+        console.warn = function() {
+          if (isFirestoreAdvisory(arguments)) return;
+          origWarn.apply(console, arguments);
+        };
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

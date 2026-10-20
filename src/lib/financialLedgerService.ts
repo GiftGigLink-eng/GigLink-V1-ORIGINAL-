@@ -20,16 +20,151 @@ import {
   GigLinkContract,
   ContractMilestone,
   FinancialLedgerRecord,
+  ProviderWebhookEventRecord,
   StripeWebhookEventRecord,
   TalentStripeAccount,
+  TalentPayoutAccount,
+  PaymentProvider,
 } from '../types';
 import { calculatePlatformFee } from './financialService';
-import { getContract, persistContract } from './contractService';
+import {
+  getContract,
+  persistContract,
+  normalizeContractData,
+  setContractInStore,
+  isCustomContractWriterInstalled,
+  isTestRuntime,
+} from './contractService';
+import { assertValidPaymentStateTransition } from '../server/payments/paymentStateMachine';
+import { assertPaymentsActive } from '../server/payments/paymentSandboxGuard';
 
 // In-memory fallback stores for offline/test environments
 const memoryLedger: FinancialLedgerRecord[] = [];
-const memoryWebhookEvents: StripeWebhookEventRecord[] = [];
-const memoryTalentAccounts: Map<string, TalentStripeAccount> = new Map();
+const memoryWebhookEvents: ProviderWebhookEventRecord[] = [];
+const memoryTalentAccounts: Map<string, TalentPayoutAccount> = new Map();
+
+/**
+ * Generates a deterministic, immutable ledger ID for escrow funding transactions.
+ * Prevents duplicate ledger entries for the same provider payment reference.
+ */
+export function getDeterministicFundingLedgerId(providerPaymentReference: string): string {
+  const sanitized = (providerPaymentReference || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `tx_fund_${sanitized}`;
+}
+
+/**
+ * Generates a stable, deterministic payout transfer reference for a milestone payout.
+ * Reused on retries of the same operation across timeouts and restarts.
+ */
+export function getStablePayoutReference(
+  contractId: string,
+  milestoneId: string,
+  attempt: number = 1
+): string {
+  const sanitizedContract = (contractId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sanitizedMilestone = (milestoneId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (attempt > 1) {
+    return `pstk_trf_${sanitizedContract}_${sanitizedMilestone}_att${attempt}`;
+  }
+  return `pstk_trf_${sanitizedContract}_${sanitizedMilestone}`;
+}
+
+/**
+ * Generates a deterministic, immutable ledger ID for milestone release transactions.
+ */
+export function getDeterministicReleaseLedgerId(contractId: string, milestoneId: string): string {
+  const sanitizedContract = (contractId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const sanitizedMilestone = (milestoneId || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `tx_rel_${sanitizedContract}_${sanitizedMilestone}`;
+}
+
+/**
+ * Generates a deterministic, immutable ledger ID for payout disbursements.
+ */
+export function getDeterministicPayoutLedgerId(providerPayoutReference: string): string {
+  const sanitized = (providerPayoutReference || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `tx_payout_${sanitized}`;
+}
+
+/**
+ * Generates a deterministic, immutable ledger ID for escrow refunds.
+ */
+export function getDeterministicRefundLedgerId(providerRefundReference: string): string {
+  const sanitized = (providerRefundReference || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `tx_ref_${sanitized}`;
+}
+
+export function clearMemoryWebhookEventsForTesting(): void {
+  memoryWebhookEvents.length = 0;
+}
+
+export function getMemoryWebhookEventsForTesting(): readonly ProviderWebhookEventRecord[] {
+  return [...memoryWebhookEvents];
+}
+
+let simulatedFundingTxFailure: Error | null = null;
+export function setSimulatedFundingTxFailureForTesting(err: Error | null): void {
+  simulatedFundingTxFailure = err;
+}
+export function getSimulatedFundingTxFailureForTesting(): Error | null {
+  return simulatedFundingTxFailure;
+}
+
+/**
+ * Inspects whether a webhook event was already processed or recorded.
+ * Does NOT mutate or mark the event as processed.
+ */
+export async function getWebhookEventRecord(eventId: string): Promise<ProviderWebhookEventRecord | null> {
+  const mem = memoryWebhookEvents.find((e) => e.id === eventId);
+  if (mem) return mem;
+
+  try {
+    const snap = await getDoc(doc(db, 'webhookEvents', eventId));
+    if (snap.exists()) {
+      return snap.data() as ProviderWebhookEventRecord;
+    }
+  } catch {
+    // Offline or permission restrictions in test runtime
+  }
+  return null;
+}
+
+/**
+ * Permanently records a fatal/irrecoverable validation failure for a webhook event
+ * (e.g. underpayment, wrong currency, missing contract/milestone) to prevent infinite retries.
+ */
+export async function recordWebhookEventPermanentFailure(
+  eventId: string,
+  error: string,
+  provider: PaymentProvider = 'paystack',
+  eventType = 'charge.success'
+): Promise<ProviderWebhookEventRecord> {
+  assertPaymentsActive('recordWebhookEventPermanentFailure');
+
+  const record: ProviderWebhookEventRecord = {
+    id: eventId,
+    provider,
+    type: eventType,
+    created: Date.now(),
+    processedAt: new Date().toISOString(),
+    status: 'failed',
+    error,
+  };
+
+  try {
+    await setDoc(doc(db, 'webhookEvents', eventId), record);
+  } catch {
+    // Offline / test fallback
+  }
+
+  const existingIdx = memoryWebhookEvents.findIndex((e) => e.id === eventId);
+  if (existingIdx >= 0) {
+    memoryWebhookEvents[existingIdx] = record;
+  } else {
+    memoryWebhookEvents.push(record);
+  }
+  return record;
+}
 
 /**
  * Test hook for mocking/controlling the underlying Firestore writer in unit tests.
@@ -38,8 +173,38 @@ const memoryTalentAccounts: Map<string, TalentStripeAccount> = new Map();
 export type LedgerFirestoreWriter = (ledgerRef: any, data: FinancialLedgerRecord) => Promise<void>;
 let customLedgerWriter: LedgerFirestoreWriter | null = null;
 
+/**
+ * Server-Authoritative Admin SDK Ledger Writer Hook.
+ * Set by serverFinancialLedgerService in Node.js server runtime to bypass client rules authoritatively.
+ */
+export type AuthoritativeLedgerWriter = (record: FinancialLedgerRecord) => Promise<void>;
+let authoritativeLedgerWriter: AuthoritativeLedgerWriter | null = null;
+
+export function setAuthoritativeLedgerWriter(writer: AuthoritativeLedgerWriter | null): void {
+  authoritativeLedgerWriter = writer;
+}
+
+export function getAuthoritativeLedgerWriter(): AuthoritativeLedgerWriter | null {
+  return authoritativeLedgerWriter;
+}
+
 export function setLedgerWriterForTesting(writer: LedgerFirestoreWriter | null): void {
+  if (writer && !isTestRuntime()) {
+    throw new Error('setLedgerWriterForTesting is strictly forbidden outside test environments.');
+  }
   customLedgerWriter = writer;
+}
+
+export function isCustomLedgerWriterInstalled(): boolean {
+  return customLedgerWriter !== null;
+}
+
+/**
+ * Validates whether isolated offline test writers are actively configured in a non-production test runtime.
+ * In production or normal client runtime, this strictly returns false.
+ */
+export function isTestIsolationActive(): boolean {
+  return isTestRuntime() && (isCustomContractWriterInstalled() || isCustomLedgerWriterInstalled());
 }
 
 export function clearMemoryLedgerForTesting(): void {
@@ -68,6 +233,8 @@ export async function appendLedgerRecord(record: FinancialLedgerRecord): Promise
 
   if (customLedgerWriter) {
     await customLedgerWriter(ledgerRef, immutableRecord);
+  } else if (authoritativeLedgerWriter) {
+    await authoritativeLedgerWriter(immutableRecord);
   } else {
     await setDoc(ledgerRef, immutableRecord);
   }
@@ -116,8 +283,12 @@ export async function checkAndRecordWebhookEvent(event: {
   id: string;
   type: string;
   created: number;
-}): Promise<{ isDuplicate: boolean; record: StripeWebhookEventRecord }> {
+  provider?: PaymentProvider;
+}): Promise<{ isDuplicate: boolean; record: ProviderWebhookEventRecord }> {
+  assertPaymentsActive('checkAndRecordWebhookEvent');
+
   const eventId = event.id;
+  const provider = event.provider || 'stripe';
 
   // Check in-memory first
   const existingMem = memoryWebhookEvents.find((e) => e.id === eventId);
@@ -129,7 +300,7 @@ export async function checkAndRecordWebhookEvent(event: {
     const eventRef = doc(db, 'webhookEvents', eventId);
     const snap = await getDoc(eventRef);
     if (snap.exists()) {
-      const rec = snap.data() as StripeWebhookEventRecord;
+      const rec = snap.data() as ProviderWebhookEventRecord;
       if (rec.status === 'processed') {
         return { isDuplicate: true, record: rec };
       }
@@ -138,8 +309,9 @@ export async function checkAndRecordWebhookEvent(event: {
     console.warn('[WebhookStore] Firestore check failed, continuing:', err);
   }
 
-  const newRecord: StripeWebhookEventRecord = {
+  const newRecord: ProviderWebhookEventRecord = {
     id: eventId,
+    provider,
     type: event.type,
     created: event.created,
     processedAt: new Date().toISOString(),
@@ -255,6 +427,8 @@ export function canReleaseMilestonePayment(
 /**
  * Client Escrow Funding Confirmation Handler.
  * Transitions: unfunded -> held
+ * Coordinates contract milestone, deterministic financial ledger record, and webhook event status
+ * in a single atomic Firestore transaction wherever feasible.
  */
 export async function recordMilestoneFunded(params: {
   contractId: string;
@@ -263,10 +437,21 @@ export async function recordMilestoneFunded(params: {
   payerName: string;
   amount: number;
   currency: string;
-  paymentIntentId?: string;
-  provider?: 'stripe' | 'simulated_stripe';
+  paymentProvider?: PaymentProvider;
+  providerPaymentReference?: string;
+  paymentIntentId?: string; // Backward-compatibility alias
+  provider?: PaymentProvider | 'simulated_stripe';
   eventId?: string;
-}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone; ledgerRecord: FinancialLedgerRecord }> {
+  eventType?: string;
+}): Promise<{
+  contract: GigLinkContract;
+  milestone: ContractMilestone;
+  ledgerRecord: FinancialLedgerRecord;
+  webhookRecord?: ProviderWebhookEventRecord;
+  isReplay?: boolean;
+}> {
+  assertPaymentsActive('recordMilestoneFunded');
+
   const {
     contractId,
     milestoneId,
@@ -274,89 +459,509 @@ export async function recordMilestoneFunded(params: {
     payerName,
     amount,
     currency,
+    paymentProvider,
+    providerPaymentReference,
     paymentIntentId,
     provider = 'stripe',
     eventId,
+    eventType = 'charge.success',
   } = params;
 
-  const contract = await getContract(contractId);
-  if (!contract) throw new Error(`Contract ${contractId} not found.`);
+  // Determine effective payment reference
+  const effectivePaymentRef =
+    providerPaymentReference || paymentIntentId || `ref_${contractId}_${milestoneId}`;
+  const effectiveProvider: PaymentProvider =
+    paymentProvider || (provider === 'simulated_stripe' ? 'test' : provider) || 'stripe';
+  const deterministicLedgerId = getDeterministicFundingLedgerId(effectivePaymentRef);
 
-  const mIdx = contract.milestones.findIndex((m) => m.id === milestoneId);
-  if (mIdx === -1) throw new Error(`Milestone ${milestoneId} not found on contract.`);
-
-  const milestone = contract.milestones[mIdx];
-
-  // Invariant state guard: Prevent double-funding or illegal transitions
-  if (milestone.paymentState === 'held' && (!milestone.requiredFundingAmount || milestone.requiredFundingAmount <= (milestone.fundedAmount || milestone.amount))) {
-    throw new Error('Milestone is already funded and held in escrow.');
-  }
-  if (milestone.paymentState === 'released') {
-    throw new Error('Milestone funds have already been released to Talent.');
-  }
-  if (milestone.paymentState === 'refunded') {
-    throw new Error('Milestone has already been refunded.');
+  // Check test simulation hook for atomic failure testing
+  if (simulatedFundingTxFailure) {
+    throw simulatedFundingTxFailure;
   }
 
-  const now = new Date().toISOString();
-  const safeAmount = Number(amount) || milestone.amount;
-  const { platformFeeRate, platformFeeAmount, netTalentAmount } = calculatePlatformFee(safeAmount);
+  const contractRef = doc(db, 'contracts', contractId);
+  const ledgerRef = doc(db, 'financialLedger', deterministicLedgerId);
+  const eventRef = eventId ? doc(db, 'webhookEvents', eventId) : null;
 
-  // Update milestone fields
-  const updatedMilestone: ContractMilestone = {
-    ...milestone,
-    paymentState: 'held',
-    fundedAt: now,
-    payerId,
-    payerName,
-    recipientId: contract.talentId,
-    recipientName: contract.talentName || 'Talent',
-    paymentIntentId: paymentIntentId || milestone.paymentIntentId || null,
-    fundedAmount: (milestone.fundedAmount || 0) + safeAmount,
-    requiredFundingAmount: milestone.amount, // fulfilled
-    updatedAt: now,
+  let result: {
+    contract: GigLinkContract;
+    milestone: ContractMilestone;
+    ledgerRecord: FinancialLedgerRecord;
+    webhookRecord?: ProviderWebhookEventRecord;
+    isReplay: boolean;
   };
 
-  const updatedMilestones = [...contract.milestones];
-  updatedMilestones[mIdx] = updatedMilestone;
+  try {
+    // ATOMIC TRANSACTION: Coordinates contract milestone, deterministic financial ledger record, and webhook event status
+    result = await runTransaction(db, async (txn) => {
+      // Check test simulation hook inside transaction
+      if (simulatedFundingTxFailure) {
+        throw simulatedFundingTxFailure;
+      }
 
-  const updatedContract: GigLinkContract = {
-    ...contract,
-    milestones: updatedMilestones,
-    updatedAt: now,
+      // -------------------------------------------------------------
+      // READ PHASE (Must precede all writes in Firestore transaction)
+      // -------------------------------------------------------------
+      const contractSnap = await txn.get(contractRef);
+      if (!contractSnap.exists()) {
+        throw new Error(`Contract ${contractId} not found.`);
+      }
+      const currentContract = normalizeContractData(contractSnap.data() as GigLinkContract);
+
+      const mIdx = currentContract.milestones.findIndex((m) => m.id === milestoneId);
+      if (mIdx === -1) {
+        throw new Error(`Milestone ${milestoneId} not found on contract.`);
+      }
+      const milestone = currentContract.milestones[mIdx];
+      const safeAmount = Number(amount) || milestone.amount;
+      const expectedCurrency = (currency || milestone.currency || 'USD').toUpperCase();
+
+      // Read existing deterministic ledger record
+      const ledgerSnap = await txn.get(ledgerRef);
+      let existingLedgerRecord: FinancialLedgerRecord | null = null;
+      if (ledgerSnap.exists()) {
+        existingLedgerRecord = ledgerSnap.data() as FinancialLedgerRecord;
+        // Requirement 6: Prevent same provider payment reference from funding different milestones/contracts
+        if (existingLedgerRecord.contractId !== contractId || existingLedgerRecord.milestoneId !== milestoneId) {
+          throw new Error(
+            `Conflict: Payment reference '${effectivePaymentRef}' was already used for contract '${existingLedgerRecord.contractId}' milestone '${existingLedgerRecord.milestoneId}'. Cross-milestone reuse is strictly prohibited.`
+          );
+        }
+        // Requirement 5: Detect conflicting amounts/currency on same milestone
+        if (
+          existingLedgerRecord.amount !== safeAmount ||
+          existingLedgerRecord.currency.toUpperCase() !== expectedCurrency
+        ) {
+          throw new Error(
+            `Conflict: Payment reference '${effectivePaymentRef}' already recorded with conflicting amount/currency (${existingLedgerRecord.amount} ${existingLedgerRecord.currency} vs ${safeAmount} ${expectedCurrency}).`
+          );
+        }
+      }
+
+      // Read webhook event record if eventId provided
+      let existingEventRecord: ProviderWebhookEventRecord | null = null;
+      if (eventRef) {
+        const eventSnap = await txn.get(eventRef);
+        if (eventSnap.exists()) {
+          existingEventRecord = eventSnap.data() as ProviderWebhookEventRecord;
+        }
+      }
+
+      // -------------------------------------------------------------
+      // IDEMPOTENT REPLAY DETECTION
+      // -------------------------------------------------------------
+      if (existingLedgerRecord) {
+        // Milestone is already funded and ledger record exists with exact matching parameters
+        let webhookRec: ProviderWebhookEventRecord | undefined;
+        if (eventRef && (!existingEventRecord || existingEventRecord.status !== 'processed')) {
+          webhookRec = {
+            id: eventId!,
+            provider: effectiveProvider,
+            type: eventType,
+            created: Date.now(),
+            processedAt: new Date().toISOString(),
+            status: 'processed',
+            contractId: currentContract.id,
+            milestoneId: milestone.id,
+            transactionId: deterministicLedgerId,
+          };
+          txn.set(eventRef, webhookRec);
+        }
+
+        return {
+          contract: currentContract,
+          milestone,
+          ledgerRecord: existingLedgerRecord,
+          webhookRecord: webhookRec || existingEventRecord || undefined,
+          isReplay: true,
+        };
+      }
+
+      // -------------------------------------------------------------
+      // PAYMENT STATE MACHINE & INVARIANT VALIDATION
+      // -------------------------------------------------------------
+      if (milestone.paymentState === 'held') {
+        if (milestone.providerPaymentReference === effectivePaymentRef) {
+          // Already held with same reference
+          const fallbackLedger: FinancialLedgerRecord = {
+            id: deterministicLedgerId,
+            contractId: currentContract.id,
+            milestoneId: milestone.id,
+            opportunityId: currentContract.opportunityId,
+            payerId: currentContract.creatorId,
+            payerName: currentContract.creatorName || 'Client',
+            recipientId: currentContract.talentId,
+            recipientName: currentContract.talentName || 'Talent',
+            amount: safeAmount,
+            currency: expectedCurrency,
+            platformFeeRate: 0.05,
+            platformFeeAmount: safeAmount * 0.05,
+            netTalentAmount: safeAmount * 0.95,
+            type: 'milestone_funded',
+            provider: effectiveProvider,
+            providerReference: effectivePaymentRef,
+            providerPaymentReference: effectivePaymentRef,
+            providerEventId: eventId || null,
+            status: 'succeeded',
+            description: `Escrow funded for "${milestone.title}" (${safeAmount} ${expectedCurrency})`,
+            createdAt: milestone.fundedAt || new Date().toISOString(),
+            completedAt: milestone.fundedAt || new Date().toISOString(),
+          };
+          return {
+            contract: currentContract,
+            milestone,
+            ledgerRecord: fallbackLedger,
+            isReplay: true,
+          };
+        }
+        throw new Error('Milestone is already funded and held in escrow with a different payment reference.');
+      }
+      if (milestone.paymentState === 'released') {
+        throw new Error('Milestone funds have already been released to Talent.');
+      }
+      if (milestone.paymentState === 'refunded') {
+        throw new Error('Milestone has already been refunded.');
+      }
+
+      assertValidPaymentStateTransition(milestone.paymentState || 'unfunded', 'held', {
+        contractId: currentContract.id,
+        milestoneId: milestone.id,
+      });
+
+      // -------------------------------------------------------------
+      // WRITE PHASE (Atomic multi-document mutations)
+      // -------------------------------------------------------------
+      const now = new Date().toISOString();
+      const { platformFeeRate, platformFeeAmount, netTalentAmount } = calculatePlatformFee(safeAmount);
+
+      // Server-authoritative payer identity: strictly contract.creatorId
+      const authoritativePayerId = currentContract.creatorId;
+      const authoritativePayerName = currentContract.creatorName || payerName || 'Client';
+
+      const updatedMilestone: ContractMilestone = {
+        ...milestone,
+        paymentState: 'held',
+        paymentProvider: effectiveProvider,
+        providerPaymentReference: effectivePaymentRef,
+        paymentIntentId: effectivePaymentRef,
+        fundedAt: now,
+        payerId: authoritativePayerId,
+        payerName: authoritativePayerName,
+        recipientId: currentContract.talentId,
+        recipientName: currentContract.talentName || 'Talent',
+        fundedAmount: (milestone.fundedAmount || 0) + safeAmount,
+        requiredFundingAmount: milestone.amount,
+        updatedAt: now,
+      };
+
+      const updatedMilestones = [...currentContract.milestones];
+      updatedMilestones[mIdx] = updatedMilestone;
+
+      const updatedContract: GigLinkContract = {
+        ...currentContract,
+        milestones: updatedMilestones,
+        updatedAt: now,
+      };
+
+      const ledgerRecord: FinancialLedgerRecord = {
+        id: deterministicLedgerId,
+        contractId: currentContract.id,
+        milestoneId: milestone.id,
+        opportunityId: currentContract.opportunityId,
+        payerId: authoritativePayerId,
+        payerName: authoritativePayerName,
+        recipientId: currentContract.talentId,
+        recipientName: currentContract.talentName || 'Talent',
+        amount: safeAmount,
+        currency: expectedCurrency,
+        platformFeeRate,
+        platformFeeAmount,
+        netTalentAmount,
+        type: 'milestone_funded',
+        provider: effectiveProvider,
+        providerReference: effectivePaymentRef,
+        providerPaymentReference: effectivePaymentRef,
+        providerEventId: eventId || null,
+        status: 'succeeded',
+        description: `Escrow funded for "${milestone.title}" (${safeAmount} ${expectedCurrency})`,
+        createdAt: now,
+        completedAt: now,
+      };
+
+      let webhookRecord: ProviderWebhookEventRecord | undefined;
+      if (eventRef) {
+        webhookRecord = {
+          id: eventId!,
+          provider: effectiveProvider,
+          type: eventType,
+          created: Date.now(),
+          processedAt: now,
+          status: 'processed',
+          contractId: currentContract.id,
+          milestoneId: milestone.id,
+          transactionId: deterministicLedgerId,
+        };
+      }
+
+      // Execute all atomic writes in the transaction
+      txn.set(contractRef, normalizeContractData(updatedContract));
+      txn.set(ledgerRef, ledgerRecord);
+      if (eventRef && webhookRecord) {
+        txn.set(eventRef, webhookRecord);
+      }
+
+      return {
+        contract: updatedContract,
+        milestone: updatedMilestone,
+        ledgerRecord,
+        webhookRecord,
+        isReplay: false,
+      };
+    });
+  } catch (txErr: any) {
+    // 1. Business validation & conflict errors must retain their exact error semantics and rethrow immediately
+    const isConflict = txErr?.message?.includes('Conflict:');
+    const isStateError =
+      txErr?.message?.includes('already funded') ||
+      txErr?.message?.includes('already been released') ||
+      txErr?.message?.includes('already been refunded') ||
+      txErr?.message?.includes('State transition') ||
+      (txErr?.message?.includes('Contract ') && txErr?.message?.includes('not found')) ||
+      (txErr?.message?.includes('Milestone ') && txErr?.message?.includes('not found'));
+    const isSimulated = txErr === simulatedFundingTxFailure || txErr?.message?.includes('Simulated');
+
+    if (isConflict || isStateError || isSimulated) {
+      throw txErr;
+    }
+
+    // 2. PRODUCTION SAFETY BOUNDARY:
+    // In production, Firestore transaction failures must NEVER trigger the non-atomic offline fallback.
+    // Unexpected transaction errors, permission errors, timeouts, unavailable-service errors,
+    // and transaction-abort errors must propagate so the webhook route returns HTTP 500 and allows Paystack retry.
+    // Permit the offline fallback ONLY when the explicit test isolation mechanism proves that
+    // test writers are installed and the runtime is not production.
+    // Do not treat a missing Firestore connection or an uninitialized client as permission to bypass the atomic transaction in production.
+    if (!isTestIsolationActive()) {
+      throw txErr;
+    }
+
+    // 3. OFFLINE / TEST RUNTIME FALLBACK (Only permitted when test writers are explicitly installed in non-production test runtime)
+    const memContract = await getContract(contractId);
+    if (!memContract) throw new Error(`Contract ${contractId} not found.`);
+
+    const mIdx = memContract.milestones.findIndex((m) => m.id === milestoneId);
+    if (mIdx === -1) throw new Error(`Milestone ${milestoneId} not found on contract.`);
+    const milestone = memContract.milestones[mIdx];
+    const safeAmount = Number(amount) || milestone.amount;
+    const expectedCurrency = (currency || milestone.currency || 'USD').toUpperCase();
+
+    // Check memory ledger for deterministic record
+    const existingLedgerRecord = memoryLedger.find((r) => r.id === deterministicLedgerId);
+    if (existingLedgerRecord) {
+      if (existingLedgerRecord.contractId !== contractId || existingLedgerRecord.milestoneId !== milestoneId) {
+        throw new Error(
+          `Conflict: Payment reference '${effectivePaymentRef}' was already used for contract '${existingLedgerRecord.contractId}' milestone '${existingLedgerRecord.milestoneId}'. Cross-milestone reuse is strictly prohibited.`
+        );
+      }
+      if (
+        existingLedgerRecord.amount !== safeAmount ||
+        existingLedgerRecord.currency.toUpperCase() !== expectedCurrency
+      ) {
+        throw new Error(
+          `Conflict: Payment reference '${effectivePaymentRef}' already recorded with conflicting amount/currency (${existingLedgerRecord.amount} ${existingLedgerRecord.currency} vs ${safeAmount} ${expectedCurrency}).`
+        );
+      }
+      // Replay
+      let webhookRecord: ProviderWebhookEventRecord | undefined;
+      if (eventId) {
+        const existingHook = memoryWebhookEvents.find((e) => e.id === eventId);
+        if (!existingHook || existingHook.status !== 'processed') {
+          webhookRecord = {
+            id: eventId,
+            provider: effectiveProvider,
+            type: eventType,
+            created: Date.now(),
+            processedAt: new Date().toISOString(),
+            status: 'processed',
+            contractId: memContract.id,
+            milestoneId: milestone.id,
+            transactionId: deterministicLedgerId,
+          };
+          const existingHookIdx = memoryWebhookEvents.findIndex((e) => e.id === eventId);
+          if (existingHookIdx >= 0) {
+            memoryWebhookEvents[existingHookIdx] = webhookRecord;
+          } else {
+            memoryWebhookEvents.push(webhookRecord);
+          }
+        }
+      }
+
+      return {
+        contract: memContract,
+        milestone,
+        ledgerRecord: existingLedgerRecord,
+        webhookRecord,
+        isReplay: true,
+      };
+    }
+
+    // State machine check
+    if (milestone.paymentState === 'held') {
+      if (milestone.providerPaymentReference === effectivePaymentRef) {
+        const matchingLedger = memoryLedger.find((r) => r.providerPaymentReference === effectivePaymentRef);
+        let webhookRecord: ProviderWebhookEventRecord | undefined;
+        if (eventId) {
+          const existingHook = memoryWebhookEvents.find((e) => e.id === eventId);
+          if (!existingHook || existingHook.status !== 'processed') {
+            webhookRecord = {
+              id: eventId,
+              provider: effectiveProvider,
+              type: eventType,
+              created: Date.now(),
+              processedAt: new Date().toISOString(),
+              status: 'processed',
+              contractId: memContract.id,
+              milestoneId: milestone.id,
+              transactionId: deterministicLedgerId,
+            };
+            const existingHookIdx = memoryWebhookEvents.findIndex((e) => e.id === eventId);
+            if (existingHookIdx >= 0) {
+              memoryWebhookEvents[existingHookIdx] = webhookRecord;
+            } else {
+              memoryWebhookEvents.push(webhookRecord);
+            }
+          }
+        }
+        return {
+          contract: memContract,
+          milestone,
+          ledgerRecord: matchingLedger || ({} as any),
+          webhookRecord,
+          isReplay: true,
+        };
+      }
+      throw new Error('Milestone is already funded and held in escrow with a different payment reference.');
+    }
+    if (milestone.paymentState === 'released') {
+      throw new Error('Milestone funds have already been released to Talent.');
+    }
+    if (milestone.paymentState === 'refunded') {
+      throw new Error('Milestone has already been refunded.');
+    }
+
+    assertValidPaymentStateTransition(milestone.paymentState || 'unfunded', 'held', {
+      contractId: memContract.id,
+      milestoneId: milestone.id,
+    });
+
+    const now = new Date().toISOString();
+    const { platformFeeRate, platformFeeAmount, netTalentAmount } = calculatePlatformFee(safeAmount);
+    const authoritativePayerId = memContract.creatorId;
+    const authoritativePayerName = memContract.creatorName || payerName || 'Client';
+
+    const updatedMilestone: ContractMilestone = {
+      ...milestone,
+      paymentState: 'held',
+      paymentProvider: effectiveProvider,
+      providerPaymentReference: effectivePaymentRef,
+      paymentIntentId: effectivePaymentRef,
+      fundedAt: now,
+      payerId: authoritativePayerId,
+      payerName: authoritativePayerName,
+      recipientId: memContract.talentId,
+      recipientName: memContract.talentName || 'Talent',
+      fundedAmount: (milestone.fundedAmount || 0) + safeAmount,
+      requiredFundingAmount: milestone.amount,
+      updatedAt: now,
+    };
+
+    const updatedMilestones = [...memContract.milestones];
+    updatedMilestones[mIdx] = updatedMilestone;
+
+    const updatedContract: GigLinkContract = {
+      ...memContract,
+      milestones: updatedMilestones,
+      updatedAt: now,
+    };
+
+    const ledgerRecord: FinancialLedgerRecord = {
+      id: deterministicLedgerId,
+      contractId: memContract.id,
+      milestoneId: milestone.id,
+      opportunityId: memContract.opportunityId,
+      payerId: authoritativePayerId,
+      payerName: authoritativePayerName,
+      recipientId: memContract.talentId,
+      recipientName: memContract.talentName || 'Talent',
+      amount: safeAmount,
+      currency: expectedCurrency,
+      platformFeeRate,
+      platformFeeAmount,
+      netTalentAmount,
+      type: 'milestone_funded',
+      provider: effectiveProvider,
+      providerReference: effectivePaymentRef,
+      providerPaymentReference: effectivePaymentRef,
+      providerEventId: eventId || null,
+      status: 'succeeded',
+      description: `Escrow funded for "${milestone.title}" (${safeAmount} ${expectedCurrency})`,
+      createdAt: now,
+      completedAt: now,
+    };
+
+    let webhookRecord: ProviderWebhookEventRecord | undefined;
+    if (eventId) {
+      webhookRecord = {
+        id: eventId,
+        provider: effectiveProvider,
+        type: eventType,
+        created: Date.now(),
+        processedAt: now,
+        status: 'processed',
+        contractId: memContract.id,
+        milestoneId: milestone.id,
+        transactionId: deterministicLedgerId,
+      };
+    }
+
+    result = {
+      contract: updatedContract,
+      milestone: updatedMilestone,
+      ledgerRecord,
+      webhookRecord,
+      isReplay: false,
+    };
+
+    await persistContract(updatedContract);
+    if (customLedgerWriter) {
+      await customLedgerWriter(ledgerRef, ledgerRecord);
+    }
+  }
+
+  // Update in-memory caches strictly AFTER transaction successfully committed
+  setContractInStore(result.contract);
+  const existingLedgerIdx = memoryLedger.findIndex((r) => r.id === result.ledgerRecord.id);
+  if (existingLedgerIdx >= 0) {
+    memoryLedger[existingLedgerIdx] = result.ledgerRecord;
+  } else {
+    memoryLedger.unshift(result.ledgerRecord);
+  }
+
+  if (result.webhookRecord) {
+    const existingHookIdx = memoryWebhookEvents.findIndex((e) => e.id === result.webhookRecord!.id);
+    if (existingHookIdx >= 0) {
+      memoryWebhookEvents[existingHookIdx] = result.webhookRecord;
+    } else {
+      memoryWebhookEvents.push(result.webhookRecord);
+    }
+  }
+
+  return {
+    contract: result.contract,
+    milestone: result.milestone,
+    ledgerRecord: result.ledgerRecord,
+    isReplay: result.isReplay,
   };
-
-  await persistContract(updatedContract);
-
-  // Create immutable ledger record
-  const ledgerId = `tx_fund_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  const ledgerRecord: FinancialLedgerRecord = {
-    id: ledgerId,
-    contractId: contract.id,
-    milestoneId: milestone.id,
-    opportunityId: contract.opportunityId,
-    payerId,
-    payerName,
-    recipientId: contract.talentId,
-    recipientName: contract.talentName || 'Talent',
-    amount: safeAmount,
-    currency: currency || milestone.currency || 'USD',
-    platformFeeRate,
-    platformFeeAmount,
-    netTalentAmount,
-    type: 'milestone_funded',
-    provider,
-    providerReference: paymentIntentId || null,
-    providerEventId: eventId || null,
-    status: 'succeeded',
-    description: `Escrow funded for "${milestone.title}" ($${safeAmount} ${currency || 'USD'})`,
-    createdAt: now,
-    completedAt: now,
-  };
-
-  await appendLedgerRecord(ledgerRecord);
-
-  return { contract: updatedContract, milestone: updatedMilestone, ledgerRecord };
 }
 
 /**
@@ -367,11 +972,24 @@ export async function recordMilestonePaymentReleased(params: {
   contractId: string;
   milestoneId: string;
   authorizedByUserId: string;
-  transferId?: string;
-  provider?: 'stripe' | 'simulated_stripe';
+  providerPayoutReference?: string;
+  transferId?: string; // Backward-compatibility alias
+  provider?: PaymentProvider | 'simulated_stripe';
+  paymentProvider?: PaymentProvider;
   userIsOrgAdmin?: boolean;
 }): Promise<{ contract: GigLinkContract; milestone: ContractMilestone; ledgerRecord: FinancialLedgerRecord }> {
-  const { contractId, milestoneId, authorizedByUserId, transferId, provider = 'stripe', userIsOrgAdmin = false } = params;
+  assertPaymentsActive('recordMilestonePaymentReleased');
+
+  const {
+    contractId,
+    milestoneId,
+    authorizedByUserId,
+    providerPayoutReference,
+    transferId,
+    provider = 'stripe',
+    paymentProvider,
+    userIsOrgAdmin = false,
+  } = params;
 
   const contract = await getContract(contractId);
   if (!contract) throw new Error(`Contract ${contractId} not found.`);
@@ -383,15 +1001,28 @@ export async function recordMilestonePaymentReleased(params: {
 
   const mIdx = contract.milestones.findIndex((m) => m.id === milestoneId);
   const milestone = contract.milestones[mIdx];
+
+  assertValidPaymentStateTransition(milestone.paymentState, 'released', {
+    contractId: contract.id,
+    milestoneId: milestone.id,
+  });
+
   const now = new Date().toISOString();
   const amount = Number(milestone.amount) || 0;
   const { platformFeeRate, platformFeeAmount, netTalentAmount } = calculatePlatformFee(amount);
 
+  const effectivePayoutRef =
+    providerPayoutReference || transferId || milestone.providerPayoutReference || milestone.transferId || null;
+  const effectiveProvider: PaymentProvider =
+    paymentProvider || (provider === 'simulated_stripe' ? 'test' : provider) || milestone.paymentProvider || 'stripe';
+
   const updatedMilestone: ContractMilestone = {
     ...milestone,
     paymentState: 'released',
+    paymentProvider: effectiveProvider,
+    providerPayoutReference: effectivePayoutRef,
+    transferId: effectivePayoutRef, // Backward-compatibility sync
     releasedAt: now,
-    transferId: transferId || milestone.transferId || null,
     updatedAt: now,
   };
 
@@ -424,7 +1055,8 @@ export async function recordMilestonePaymentReleased(params: {
     netTalentAmount,
     type: 'milestone_released',
     provider,
-    providerReference: transferId || null,
+    providerReference: effectivePayoutRef,
+    providerPayoutReference: effectivePayoutRef,
     status: 'succeeded',
     description: `Escrow released for approved milestone "${milestone.title}" (Net: $${netTalentAmount}, Fee: $${platformFeeAmount})`,
     createdAt: now,
@@ -446,18 +1078,24 @@ export async function recordMilestoneRefund(params: {
   authorizedByUserId: string;
   refundAmount?: number;
   reason?: string;
-  refundId?: string;
-  provider?: 'stripe' | 'simulated_stripe';
+  providerRefundReference?: string;
+  refundId?: string; // Backward-compatibility alias
+  provider?: PaymentProvider | 'simulated_stripe';
+  paymentProvider?: PaymentProvider;
   userIsOrgAdmin?: boolean;
 }): Promise<{ contract: GigLinkContract; milestone: ContractMilestone; ledgerRecord: FinancialLedgerRecord }> {
+  assertPaymentsActive('recordMilestoneRefund');
+
   const {
     contractId,
     milestoneId,
     authorizedByUserId,
     refundAmount,
     reason,
+    providerRefundReference,
     refundId,
     provider = 'stripe',
+    paymentProvider,
     userIsOrgAdmin = false,
   } = params;
 
@@ -471,6 +1109,11 @@ export async function recordMilestoneRefund(params: {
   if (mIdx === -1) throw new Error('Milestone not found.');
 
   const milestone = contract.milestones[mIdx];
+  assertValidPaymentStateTransition(milestone.paymentState, 'refunded', {
+    contractId: contract.id,
+    milestoneId: milestone.id,
+  });
+
   if (milestone.paymentState !== 'held') {
     throw new Error(`Cannot refund milestone with payment state "${milestone.paymentState}". Only held funds can be refunded.`);
   }
@@ -478,11 +1121,18 @@ export async function recordMilestoneRefund(params: {
   const now = new Date().toISOString();
   const amountToRefund = Math.min(milestone.fundedAmount || milestone.amount, refundAmount || milestone.amount);
 
+  const effectiveRefundRef =
+    providerRefundReference || refundId || milestone.providerRefundReference || milestone.refundId || null;
+  const effectiveProvider: PaymentProvider =
+    paymentProvider || (provider === 'simulated_stripe' ? 'test' : provider) || milestone.paymentProvider || 'stripe';
+
   const updatedMilestone: ContractMilestone = {
     ...milestone,
     paymentState: 'refunded',
+    paymentProvider: effectiveProvider,
+    providerRefundReference: effectiveRefundRef,
+    refundId: effectiveRefundRef, // Backward-compatibility sync
     refundedAt: now,
-    refundId: refundId || null,
     updatedAt: now,
   };
 
@@ -514,7 +1164,8 @@ export async function recordMilestoneRefund(params: {
     netTalentAmount: 0,
     type: 'refund_completed',
     provider,
-    providerReference: refundId || null,
+    providerReference: effectiveRefundRef,
+    providerRefundReference: effectiveRefundRef,
     status: 'succeeded',
     description: `Refund processed for "${milestone.title}" ($${amountToRefund} ${milestone.currency || 'USD'})${reason ? `: ${reason}` : ''}`,
     createdAt: now,
@@ -527,9 +1178,130 @@ export async function recordMilestoneRefund(params: {
 }
 
 /**
- * Connect / Link Talent Stripe Payout Account.
+ * Milestone Payout Settled Handler (Webhooks: transfer.success).
+ * Transitions: released -> paid_out or payout_pending -> paid_out
  */
-export async function setTalentPayoutAccount(account: TalentStripeAccount): Promise<TalentStripeAccount> {
+export async function recordMilestonePayoutSuccess(params: {
+  contractId: string;
+  milestoneId: string;
+  payoutReference: string;
+  provider?: PaymentProvider;
+  eventId?: string;
+}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone; ledgerRecord: FinancialLedgerRecord }> {
+  assertPaymentsActive('recordMilestonePayoutSuccess');
+
+  const { contractId, milestoneId, payoutReference, provider = 'paystack', eventId } = params;
+  const contract = await getContract(contractId);
+  if (!contract) throw new Error(`Contract ${contractId} not found.`);
+
+  const mIdx = contract.milestones.findIndex((m) => m.id === milestoneId);
+  if (mIdx === -1) throw new Error(`Milestone ${milestoneId} not found.`);
+  const milestone = contract.milestones[mIdx];
+
+  assertValidPaymentStateTransition(milestone.paymentState, 'paid_out', {
+    contractId: contract.id,
+    milestoneId: milestone.id,
+  });
+
+  const now = new Date().toISOString();
+  const amount = Number(milestone.amount) || 0;
+  const { platformFeeRate, platformFeeAmount, netTalentAmount } = calculatePlatformFee(amount);
+
+  const updatedMilestone: ContractMilestone = {
+    ...milestone,
+    paymentState: 'paid_out',
+    providerPayoutReference: payoutReference || milestone.providerPayoutReference,
+    updatedAt: now,
+  };
+
+  const updatedMilestones = [...contract.milestones];
+  updatedMilestones[mIdx] = updatedMilestone;
+
+  const updatedContract: GigLinkContract = {
+    ...contract,
+    milestones: updatedMilestones,
+    updatedAt: now,
+  };
+
+  await persistContract(updatedContract);
+
+  const ledgerId = `tx_po_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const ledgerRecord: FinancialLedgerRecord = {
+    id: ledgerId,
+    contractId: contract.id,
+    milestoneId: milestone.id,
+    opportunityId: contract.opportunityId,
+    payerId: contract.creatorId,
+    payerName: contract.creatorName || 'Client',
+    recipientId: contract.talentId,
+    recipientName: contract.talentName || 'Talent',
+    amount,
+    currency: milestone.currency || 'USD',
+    platformFeeRate,
+    platformFeeAmount,
+    netTalentAmount,
+    type: 'payout_completed',
+    provider,
+    providerReference: payoutReference,
+    providerPayoutReference: payoutReference,
+    providerEventId: eventId,
+    status: 'succeeded',
+    description: `Payout settled to partner for milestone "${milestone.title}" (Net: $${netTalentAmount})`,
+    createdAt: now,
+    completedAt: now,
+  };
+
+  await appendLedgerRecord(ledgerRecord);
+
+  return { contract: updatedContract, milestone: updatedMilestone, ledgerRecord };
+}
+
+/**
+ * Milestone Payout Failure Handler (Webhooks: transfer.failed / transfer.reversed).
+ */
+export async function recordMilestonePayoutFailure(params: {
+  contractId: string;
+  milestoneId: string;
+  payoutReference?: string;
+  reason?: string;
+}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone }> {
+  assertPaymentsActive('recordMilestonePayoutFailure');
+
+  const { contractId, milestoneId, payoutReference } = params;
+  const contract = await getContract(contractId);
+  if (!contract) throw new Error(`Contract ${contractId} not found.`);
+
+  const mIdx = contract.milestones.findIndex((m) => m.id === milestoneId);
+  if (mIdx === -1) throw new Error(`Milestone ${milestoneId} not found.`);
+  const milestone = contract.milestones[mIdx];
+
+  const now = new Date().toISOString();
+  const updatedMilestone: ContractMilestone = {
+    ...milestone,
+    paymentState: 'payout_failed',
+    providerPayoutReference: payoutReference || milestone.providerPayoutReference,
+    updatedAt: now,
+  };
+
+  const updatedMilestones = [...contract.milestones];
+  updatedMilestones[mIdx] = updatedMilestone;
+
+  const updatedContract: GigLinkContract = {
+    ...contract,
+    milestones: updatedMilestones,
+    updatedAt: now,
+  };
+
+  await persistContract(updatedContract);
+  return { contract: updatedContract, milestone: updatedMilestone };
+}
+
+/**
+ * Connect / Link Talent Payout Account (Server-authoritative).
+ */
+export async function setTalentPayoutAccount(account: TalentPayoutAccount): Promise<TalentPayoutAccount> {
+  assertPaymentsActive('setTalentPayoutAccount');
+
   try {
     const docRef = doc(db, 'talentPayoutAccounts', account.userId);
     await setDoc(docRef, account);
@@ -541,14 +1313,14 @@ export async function setTalentPayoutAccount(account: TalentStripeAccount): Prom
 }
 
 /**
- * Retrieves Talent Stripe Payout Account.
+ * Retrieves Talent Payout Account.
  */
-export async function getTalentPayoutAccount(userId: string): Promise<TalentStripeAccount | null> {
+export async function getTalentPayoutAccount(userId: string): Promise<TalentPayoutAccount | null> {
   try {
     const docRef = doc(db, 'talentPayoutAccounts', userId);
     const snap = await getDoc(docRef);
     if (snap.exists()) {
-      return snap.data() as TalentStripeAccount;
+      return snap.data() as TalentPayoutAccount;
     }
   } catch (err) {
     console.warn('[PayoutStore] Could not fetch from Firestore:', err);

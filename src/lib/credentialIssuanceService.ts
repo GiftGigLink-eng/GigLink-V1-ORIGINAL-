@@ -292,7 +292,7 @@ export async function claimVerifiableCredential(
   // Attach to User's Trust Passport and add verified certifications/skills
   if (db) {
     try {
-      const passportRef = doc(db, 'passports', recipientUid);
+      const passportRef = doc(db, 'trustPassports', recipientUid);
       const passportSnap = await getDoc(passportRef);
 
       const newCert: CertificationItem = {

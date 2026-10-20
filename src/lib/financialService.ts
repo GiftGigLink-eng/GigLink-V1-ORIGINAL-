@@ -63,19 +63,19 @@ export function deriveContractFinancialSummary(
       hasAdditionalFundingRequired = true;
     }
 
-    if (m.paymentState === 'released') {
+    if (m.paymentState === 'released' || m.paymentState === 'payout_pending' || m.paymentState === 'paid_out') {
       totalReleased += amount;
       totalFunded += amount;
       const { platformFeeAmount, netTalentAmount } = calculatePlatformFee(amount);
       totalPlatformFees += platformFeeAmount;
       netTalentEarned += netTalentAmount;
-    } else if (m.paymentState === 'held') {
+    } else if (m.paymentState === 'held' || m.paymentState === 'release_pending' || m.paymentState === 'refund_pending') {
       totalHeldInEscrow += amount;
       totalFunded += amount;
     } else if (m.paymentState === 'refunded') {
       totalRefunded += amount;
     } else {
-      // unfunded
+      // unfunded, funding_pending, funding_failed, payout_failed
       totalUnfunded += amount;
       if (m.status === 'in_progress' || m.reviewState === 'pending_submission' || m.reviewState === 'submitted') {
         hasUnfundedActiveMilestones = true;
@@ -107,7 +107,13 @@ export function deriveContractFinancialSummary(
  * Checks if a milestone is funded and held in escrow before work submission.
  */
 export function isMilestoneEscrowFunded(milestone: ContractMilestone): boolean {
-  return milestone.paymentState === 'held' || milestone.paymentState === 'released';
+  return (
+    milestone.paymentState === 'held' ||
+    milestone.paymentState === 'release_pending' ||
+    milestone.paymentState === 'released' ||
+    milestone.paymentState === 'payout_pending' ||
+    milestone.paymentState === 'paid_out'
+  );
 }
 
 /**

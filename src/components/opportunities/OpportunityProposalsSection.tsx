@@ -51,6 +51,11 @@ export const OpportunityProposalsSection: React.FC<OpportunityProposalsSectionPr
   );
 
   const loadProposals = async () => {
+    if (!currentUserId) {
+      setProposals([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     try {
       if (isCreator) {
@@ -61,8 +66,12 @@ export const OpportunityProposalsSection: React.FC<OpportunityProposalsSectionPr
         const myForThisOpp = list.filter((p) => p.opportunityId === opportunity.id);
         setProposals(myForThisOpp);
       }
-    } catch (err) {
-      console.error('Failed to load proposals:', err);
+    } catch (err: any) {
+      if (err?.message?.includes('Unauthorized') || err?.code === 'permission-denied') {
+        console.warn('[OpportunityProposalsSection] Caller not authorized to view proposals:', err?.message);
+      } else {
+        console.error('Failed to load proposals:', err);
+      }
     } finally {
       setLoading(false);
     }

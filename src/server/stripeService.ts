@@ -1,6 +1,26 @@
 /**
- * Stripe & Financial Settlement Service for GigLink V1 (Phase 4)
- * Secure, server-side implementation for Escrow, Webhooks, Idempotency & Payouts.
+ * @deprecated LEGACY STRIPE PROTOTYPE (Phase 4 Prototype)
+ *
+ * ARCHITECTURAL NOTICE (Phase C-2A Audit & Findings Closure):
+ * This file is an isolated legacy prototype. It is NOT part of the active provider-neutral
+ * payment architecture.
+ *
+ * ACTIVE ARCHITECTURE:
+ * All authoritative payment, escrow funding, release, refund, and payout operations are handled
+ * exclusively by PaymentOrchestrator (src/server/payments/PaymentOrchestrator.ts) and its
+ * registered payment adapters.
+ *
+ * REMAINING DEPENDENCY:
+ * The single remaining caller of this module in the entire application is server.ts:
+ * `verifyStripeWebhookSignature` is called by the POST /api/payments/webhook endpoint to verify
+ * inbound Stripe webhook payload signatures.
+ *
+ * NO ACTIVE PRODUCTION PAYMENT PATH INVOKES:
+ * - createMilestonePaymentIntent() [DEPRECATED - Superseded by PaymentOrchestrator.createMilestonePayment]
+ * - executeMilestonePayout()        [DEPRECATED - Superseded by PaymentOrchestrator.executeMilestonePayout]
+ * - executeMilestoneRefund()        [DEPRECATED - Superseded by PaymentOrchestrator.executeMilestoneRefund]
+ *
+ * Note: Stripe Connect implementation is deferred; initial active providers are Flutterwave and Paystack.
  */
 
 import Stripe from 'stripe';
@@ -33,7 +53,9 @@ export interface PaymentIntentCreationResult {
 }
 
 /**
- * Creates or retrieves a Stripe PaymentIntent for Milestone Escrow Funding.
+ * @deprecated Legacy prototype only.
+ * Superseded by defaultPaymentOrchestrator.createMilestonePayment().
+ * No active production path calls this function.
  */
 export async function createMilestonePaymentIntent(params: {
   contractId: string;
@@ -84,21 +106,29 @@ export async function createMilestonePaymentIntent(params: {
     }
   }
 
-  // Safe fallback simulation if STRIPE_SECRET_KEY is not configured in current sandbox environment
-  const mockIntentId = `pi_sim_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  return {
-    clientSecret: `${mockIntentId}_secret_${Math.random().toString(36).substring(2, 12)}`,
-    paymentIntentId: mockIntentId,
-    mode: 'simulated',
-    amount,
-    currency,
-    platformFee: platformFeeAmount,
-    netTalentAmount,
-  };
+  if (!stripe) {
+    if (process.env.NODE_ENV === 'test') {
+      const mockIntentId = `test_pi_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      return {
+        clientSecret: `${mockIntentId}_secret_test`,
+        paymentIntentId: mockIntentId,
+        mode: 'simulated',
+        amount,
+        currency,
+        platformFee: platformFeeAmount,
+        netTalentAmount,
+      };
+    }
+    throw new Error(
+      'Payment provider error: STRIPE_SECRET_KEY is not configured on server. Real payment operations fail closed; simulation is disabled.'
+    );
+  }
 }
 
 /**
- * Creates a Stripe Transfer (or records payout) when milestone funds are released.
+ * @deprecated Legacy prototype only.
+ * Superseded by defaultPaymentOrchestrator.executeMilestonePayout().
+ * No active production path calls this function.
  */
 export async function executeMilestonePayout(params: {
   contractId: string;
@@ -145,16 +175,24 @@ export async function executeMilestonePayout(params: {
     }
   }
 
-  const simulatedTransferId = `tr_sim_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  return {
-    transferId: simulatedTransferId,
-    mode: 'simulated',
-    status: 'succeeded',
-  };
+  if (process.env.NODE_ENV === 'test') {
+    const simulatedTransferId = `test_tr_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    return {
+      transferId: simulatedTransferId,
+      mode: 'simulated',
+      status: 'succeeded',
+    };
+  }
+
+  throw new Error(
+    'Payment provider error: Cannot execute payout because live Stripe credentials or talent payout account are not configured. Simulation is disabled.'
+  );
 }
 
 /**
- * Executes a refund for a held milestone in Stripe.
+ * @deprecated Legacy prototype only.
+ * Superseded by defaultPaymentOrchestrator.executeMilestoneRefund().
+ * No active production path calls this function.
  */
 export async function executeMilestoneRefund(params: {
   paymentIntentId: string;
@@ -168,7 +206,7 @@ export async function executeMilestoneRefund(params: {
   const { paymentIntentId, amount, reason } = params;
   const stripe = getStripe();
 
-  if (stripe && paymentIntentId && !paymentIntentId.startsWith('pi_sim_')) {
+  if (stripe && paymentIntentId && !paymentIntentId.startsWith('pi_sim_') && !paymentIntentId.startsWith('test_pi_')) {
     try {
       const refund = await stripe.refunds.create({
         payment_intent: paymentIntentId,
@@ -187,16 +225,23 @@ export async function executeMilestoneRefund(params: {
     }
   }
 
-  const simulatedRefundId = `re_sim_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  return {
-    refundId: simulatedRefundId,
-    mode: 'simulated',
-    status: 'succeeded',
-  };
+  if (process.env.NODE_ENV === 'test') {
+    const simulatedRefundId = `test_re_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    return {
+      refundId: simulatedRefundId,
+      mode: 'simulated',
+      status: 'succeeded',
+    };
+  }
+
+  throw new Error(
+    'Payment provider error: Cannot execute refund because live Stripe credentials or payment reference are unavailable. Simulation is disabled.'
+  );
 }
 
 /**
  * Verifies the Stripe Webhook signature using raw payload buffer.
+ * Preserved for incoming Stripe webhook validation at POST /api/payments/webhook.
  */
 export function verifyStripeWebhookSignature(
   rawBody: Buffer | string,
@@ -220,3 +265,4 @@ export function verifyStripeWebhookSignature(
     return { valid: false, error: err.message };
   }
 }
+

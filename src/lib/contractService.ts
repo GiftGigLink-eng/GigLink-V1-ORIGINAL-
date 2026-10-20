@@ -17,6 +17,9 @@ import {
   ContractMilestone,
   ContractMilestoneDelivery,
   ContractMilestoneReview,
+  ContractMilestoneWorkState,
+  ContractMilestoneSubmissionVersion,
+  ContractMilestoneReviewRecord,
   ContractFinalHandover,
   ContractStatus,
   OpportunityMilestone,
@@ -28,12 +31,13 @@ import {
   ContractMilestoneChange,
   ChangeRequestStatus,
 } from '../types';
+import { postApi } from './apiClient';
 
 /**
  * In-memory authoritative contract store to provide instant session persistence
  * and resilient fallbacks when running offline or without active Firestore rules.
  */
-const contractsStore = new Map<string, GigLinkContract>();
+export const contractsStore = new Map<string, GigLinkContract>();
 
 /**
  * Mutex queue per contract ID to serialize concurrent local and transaction operations
@@ -78,6 +82,55 @@ export function normalizeContractData(contract: GigLinkContract): GigLinkContrac
     originalScope: contract.originalScope || { ...contract.scopeLock },
     changeRequests: contract.changeRequests || [],
     amendmentHistory: contract.amendmentHistory || [],
+    milestones: Array.isArray(contract.milestones)
+      ? contract.milestones.map((m, idx) => {
+          let workState = m.workState;
+          if (!workState) {
+            if (m.reviewState === 'approved' || m.status === 'completed') {
+              workState = 'approved';
+            } else if (m.reviewState === 'revision_requested') {
+              workState = 'revision_requested';
+            } else if (m.reviewState === 'submitted' || m.reviewState === 'in_review') {
+              workState = 'submitted';
+            } else if (m.status === 'in_progress') {
+              workState = 'in_progress';
+            } else if (idx === 0 && m.paymentState === 'held') {
+              workState = 'ready_to_start';
+            }
+          }
+          let submissions = m.submissions;
+          if (!Array.isArray(submissions)) {
+            if (m.submission && m.submission.deliveryNote) {
+              submissions = [
+                {
+                  versionNumber: 1,
+                  submittedBy: m.submission.submittedBy || 'talent',
+                  submittedByName: 'Partner',
+                  submittedAt: m.submission.submittedAt || m.submittedAt || m.createdAt || new Date().toISOString(),
+                  reviewDeadlineAt: new Date(Date.now() + 14 * 86400000).toISOString(),
+                  deliveryNote: m.submission.deliveryNote,
+                  demoUrl: m.submission.demoUrl,
+                  repoUrl: m.submission.repoUrl,
+                  figmaUrl: m.submission.figmaUrl,
+                  additionalLinks: m.submission.links || [],
+                  evidenceFiles: m.submission.evidenceFiles || [],
+                },
+              ];
+            } else {
+              submissions = [];
+            }
+          }
+          return {
+            ...m,
+            workState,
+            submissions,
+            revisionAllowance: m.revisionAllowance ?? 2,
+            revisionCount: m.revisionCount ?? 0,
+            reviewRecords: m.reviewRecords || [],
+            reviewHistory: m.reviewHistory || [],
+          };
+        })
+      : [],
   };
 }
 
@@ -86,6 +139,13 @@ export function normalizeContractData(contract: GigLinkContract): GigLinkContrac
  */
 export function clearContractStore(): void {
   contractsStore.clear();
+}
+
+/**
+ * Updates contract in memory store (used by atomic transactions)
+ */
+export function setContractInStore(contract: GigLinkContract): void {
+  contractsStore.set(contract.id, normalizeContractData(contract));
 }
 
 /**
@@ -102,14 +162,32 @@ export function getAllInMemoryContracts(): GigLinkContract[] {
 export type ContractFirestoreWriter = (contractRef: any, data: GigLinkContract) => Promise<void>;
 let customContractWriter: ContractFirestoreWriter | null = null;
 
+export const isTestRuntime = (): boolean => {
+  // Browser runtime is production client environment — mocks strictly prohibited
+  if (typeof window !== 'undefined') return false;
+  if (typeof process === 'undefined') return false;
+  if (process.env?.NODE_ENV === 'production') return false;
+  return true;
+};
+
 export function setContractWriterForTesting(writer: ContractFirestoreWriter | null): void {
+  if (writer && !isTestRuntime()) {
+    throw new Error('setContractWriterForTesting is strictly forbidden outside test environments.');
+  }
   customContractWriter = writer;
+}
+
+export function isCustomContractWriterInstalled(): boolean {
+  return customContractWriter !== null;
 }
 
 export type ContractQueryReader = (userId: string) => Promise<GigLinkContract[]>;
 let customContractReader: ContractQueryReader | null = null;
 
 export function setContractReaderForTesting(reader: ContractQueryReader | null): void {
+  if (reader && !isTestRuntime()) {
+    throw new Error('setContractReaderForTesting is strictly forbidden outside test environments.');
+  }
   customContractReader = reader;
 }
 
@@ -867,6 +945,68 @@ export function migrateLegacyMilestones(
 }
 
 /**
+ * Validates whether the specified user is allowed to start work on a milestone.
+ * Rules:
+ * 1. Contract must be active
+ * 2. User must be the assigned partner (talent)
+ * 3. Contract & milestone must not be disputed
+ * 4. Milestone must not already be approved
+ * 5. All previous milestones must already be approved (Sequential Progression)
+ * 6. Milestone must be funded in escrow (paymentState === 'held')
+ */
+export function canStartMilestone(
+  contract: GigLinkContract,
+  milestoneId: string,
+  userId: string
+): { allowed: boolean; reason?: string } {
+  if (!contract) return { allowed: false, reason: 'Contract does not exist.' };
+  if (contract.status !== 'active') {
+    return { allowed: false, reason: `Contract is in '${contract.status}' status. Work can only be started on active contracts.` };
+  }
+  if (contract.disputeStatus === 'open' || contract.disputeStatus === 'under_admin_review') {
+    return { allowed: false, reason: 'Milestone start blocked: Contract is currently in active dispute.' };
+  }
+  if (userId !== contract.talentId) {
+    return { allowed: false, reason: 'Unauthorized: Only the assigned Partner can start work on this milestone.' };
+  }
+
+  const index = contract.milestones.findIndex((m) => m.id === milestoneId);
+  if (index === -1) {
+    return { allowed: false, reason: 'Milestone not found on contract.' };
+  }
+
+  const milestone = contract.milestones[index];
+  if (milestone.disputeStatus === 'disputed') {
+    return { allowed: false, reason: 'Cannot start work on a disputed milestone.' };
+  }
+
+  if (milestone.workState === 'approved' || milestone.reviewState === 'approved' || milestone.status === 'completed') {
+    return { allowed: false, reason: 'This milestone has already been completed and approved.' };
+  }
+
+  // Sequential progression check: All preceding milestones must be approved
+  for (let i = 0; i < index; i++) {
+    const prev = contract.milestones[i];
+    if (prev.workState !== 'approved' && prev.reviewState !== 'approved' && prev.status !== 'completed') {
+      return {
+        allowed: false,
+        reason: `Previous milestone "${prev.title}" must be completed and approved before starting this milestone.`,
+      };
+    }
+  }
+
+  // Funding check: Escrow funds MUST be held
+  if (milestone.paymentState !== 'held') {
+    return {
+      allowed: false,
+      reason: `Escrow funding required: Client must deposit milestone funds into escrow before work can begin (current state: '${milestone.paymentState}').`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/**
  * Validates whether the specified user is allowed to submit a deliverable for a milestone.
  * Rules:
  * 1. Contract must be active
@@ -896,14 +1036,24 @@ export function canSubmitMilestone(
   }
 
   const milestone = contract.milestones[index];
-  if (milestone.reviewState === 'approved' || milestone.status === 'completed') {
+  if (milestone.workState === 'approved' || milestone.reviewState === 'approved' || milestone.status === 'completed') {
     return { allowed: false, reason: 'This milestone has already been reviewed and approved.' };
+  }
+
+  // Work state machine check: Deliverables cannot be submitted while already under review
+  if (milestone.workState === 'submitted' || milestone.reviewState === 'submitted' || milestone.reviewState === 'in_review') {
+    return { allowed: false, reason: 'Deliverables are already submitted and currently under client review.' };
+  }
+
+  // Work state machine check: Partner must officially start work before submitting deliverables
+  if (milestone.workState === 'ready_to_start') {
+    return { allowed: false, reason: 'Work must be officially started before deliverables can be submitted.' };
   }
 
   // Sequential progression check: All preceding milestones must be approved
   for (let i = 0; i < index; i++) {
     const prev = contract.milestones[i];
-    if (prev.reviewState !== 'approved' && prev.status !== 'completed') {
+    if (prev.workState !== 'approved' && prev.reviewState !== 'approved' && prev.status !== 'completed') {
       return {
         allowed: false,
         reason: `Previous milestone "${prev.title}" must be completed and approved before submitting this milestone.`,
@@ -1055,7 +1205,7 @@ export function canAcceptFinalHandover(
 export function getContractProgress(contract: GigLinkContract) {
   const total = contract.milestones.length;
   const approved = contract.milestones.filter(
-    (m) => m.reviewState === 'approved' || m.status === 'completed'
+    (m) => m.workState === 'approved' || m.reviewState === 'approved' || m.status === 'completed'
   ).length;
   const percentage = total > 0 ? Math.round((approved / total) * 100) : 0;
   const allApproved = total > 0 && approved === total;
@@ -1064,7 +1214,7 @@ export function getContractProgress(contract: GigLinkContract) {
   let currentMilestoneIndex = -1;
   for (let i = 0; i < contract.milestones.length; i++) {
     const m = contract.milestones[i];
-    if (m.reviewState !== 'approved' && m.status !== 'completed') {
+    if (m.workState !== 'approved' && m.reviewState !== 'approved' && m.status !== 'completed') {
       currentMilestoneIndex = i;
       break;
     }
@@ -1083,12 +1233,70 @@ export function getContractProgress(contract: GigLinkContract) {
 }
 
 /**
- * Talent submits a deliverable for a specific milestone.
+ * Test hook for mocking client lifecycle API calls in isolated unit tests.
+ * In production/runtime, this is null and postApi is invoked directly.
+ */
+export type LifecycleMockHandler = (
+  action: 'start' | 'submit' | 'review',
+  params: any
+) => Promise<any>;
+
+let customLifecycleMock: LifecycleMockHandler | null = null;
+
+export function setLifecycleMockForTesting(mock: LifecycleMockHandler | null): void {
+  if (mock && !isTestRuntime()) {
+    throw new Error('setLifecycleMockForTesting is strictly forbidden outside test environments.');
+  }
+  customLifecycleMock = mock;
+}
+
+/**
+ * Partner initiates work on a funded milestone.
+ * Directs to POST /api/contracts/milestones/start (Strictly Server-Authoritative).
+ * Fails closed without modifying Firestore or local store if server API is unavailable.
+ */
+export async function startMilestoneWork(params: {
+  contractId: string;
+  milestoneId: string;
+  partnerUserId?: string;
+  idempotencyKey?: string;
+}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone }> {
+  if (customLifecycleMock) {
+    if (!isTestRuntime()) {
+      throw new Error('Lifecycle mock handler is strictly prohibited in production runtime.');
+    }
+    return await customLifecycleMock('start', params);
+  }
+
+  const { contractId, milestoneId, idempotencyKey } = params;
+
+  const data = await postApi<{
+    success: boolean;
+    contract: GigLinkContract;
+    milestone: ContractMilestone;
+  }>('/api/contracts/milestones/start', {
+    contractId,
+    milestoneId,
+    idempotencyKey,
+  });
+
+  if (!data?.contract) {
+    throw new Error('Server API failed to return updated contract state.');
+  }
+
+  contractsStore.set(data.contract.id, data.contract);
+  return { contract: data.contract, milestone: data.milestone };
+}
+
+/**
+ * Partner submits deliverable version for a specific milestone.
+ * Directs to POST /api/contracts/milestones/submit (Strictly Server-Authoritative).
+ * Fails closed without modifying Firestore or local store if server API is unavailable.
  */
 export async function submitMilestoneDeliverable(params: {
   contractId: string;
   milestoneId: string;
-  talentUserId: string;
+  talentUserId?: string;
   submission: {
     deliveryNote: string;
     demoUrl?: string;
@@ -1097,174 +1305,107 @@ export async function submitMilestoneDeliverable(params: {
     links?: string[];
     evidenceFiles?: string[];
   };
-}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone }> {
-  const { contractId, milestoneId, talentUserId, submission } = params;
-
-  const contract = await getContract(contractId);
-  if (!contract) {
-    throw new Error(`Contract ${contractId} not found.`);
+  idempotencyKey?: string;
+}): Promise<{
+  contract: GigLinkContract;
+  milestone: ContractMilestone;
+  submissionVersion?: number;
+}> {
+  if (customLifecycleMock) {
+    if (!isTestRuntime()) {
+      throw new Error('Lifecycle mock handler is strictly prohibited in production runtime.');
+    }
+    return await customLifecycleMock('submit', params);
   }
 
-  // Pre-flight validation
-  const authCheck = canSubmitMilestone(contract, milestoneId, talentUserId);
-  if (!authCheck.allowed) {
-    throw new Error(authCheck.reason || 'Unauthorized milestone submission.');
+  const { contractId, milestoneId, submission, idempotencyKey } = params;
+
+  const data = await postApi<{
+    success: boolean;
+    contract: GigLinkContract;
+    milestone: ContractMilestone;
+    submissionVersion: number;
+  }>('/api/contracts/milestones/submit', {
+    contractId,
+    milestoneId,
+    deliveryNote: submission.deliveryNote,
+    demoUrl: submission.demoUrl,
+    repoUrl: submission.repoUrl,
+    figmaUrl: submission.figmaUrl,
+    additionalLinks: submission.links,
+    evidenceFiles: submission.evidenceFiles,
+    idempotencyKey,
+  });
+
+  if (!data?.contract) {
+    throw new Error('Server API failed to return updated contract state.');
   }
 
-  if (!submission.deliveryNote || submission.deliveryNote.trim().length === 0) {
-    throw new Error('A delivery note describing the completed work is required.');
-  }
-
-  const milestoneIndex = contract.milestones.findIndex((m) => m.id === milestoneId);
-  const existingMilestone = contract.milestones[milestoneIndex];
-  const now = new Date().toISOString();
-
-  // Combine URLs into links array cleanly
-  const allLinks: string[] = [...(submission.links || [])];
-  if (submission.demoUrl?.trim()) allLinks.push(submission.demoUrl.trim());
-  if (submission.repoUrl?.trim()) allLinks.push(submission.repoUrl.trim());
-  if (submission.figmaUrl?.trim()) allLinks.push(submission.figmaUrl.trim());
-  const uniqueLinks = Array.from(new Set(allLinks.filter(Boolean)));
-
-  const deliveryPayload: ContractMilestoneDelivery = {
-    submittedBy: talentUserId,
-    submittedAt: now,
-    deliveryNote: submission.deliveryNote.trim(),
-    demoUrl: submission.demoUrl?.trim() || undefined,
-    repoUrl: submission.repoUrl?.trim() || undefined,
-    figmaUrl: submission.figmaUrl?.trim() || undefined,
-    links: uniqueLinks,
-    evidenceFiles: submission.evidenceFiles || [],
+  contractsStore.set(data.contract.id, data.contract);
+  return {
+    contract: data.contract,
+    milestone: data.milestone,
+    submissionVersion: data.submissionVersion,
   };
-
-  const updatedMilestone: ContractMilestone = {
-    ...existingMilestone,
-    status: 'in_progress',
-    reviewState: 'submitted',
-    submission: deliveryPayload,
-    submittedAt: now,
-    updatedAt: now,
-  };
-
-  const updatedMilestones = [...contract.milestones];
-  updatedMilestones[milestoneIndex] = updatedMilestone;
-
-  const updatedContract: GigLinkContract = {
-    ...contract,
-    milestones: updatedMilestones,
-    updatedAt: now,
-  };
-
-  await persistContract(updatedContract);
-  return { contract: updatedContract, milestone: updatedMilestone };
 }
 
 /**
- * Creator reviews a milestone deliverable: either approves or requests a revision.
+ * Client reviews a milestone deliverable: approves, requests revision, or raises dispute.
+ * Directs to POST /api/contracts/milestones/review (Strictly Server-Authoritative).
+ * Fails closed without modifying Firestore or local store if server API is unavailable.
+ *
+ * Invariant: Approving work authorizes payment release; it does NOT release funds or modify paymentState.
  */
 export async function reviewMilestoneDeliverable(params: {
   contractId: string;
   milestoneId: string;
-  reviewerUserId: string;
-  decision: 'approved' | 'revision_requested';
+  reviewerUserId?: string;
+  decision: 'approved' | 'revision_requested' | 'disputed';
   feedback?: string;
   reviewerName?: string;
   userIsOrgAdmin?: boolean;
-}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone }> {
+  idempotencyKey?: string;
+}): Promise<{ contract: GigLinkContract; milestone: ContractMilestone; decision: string }> {
+  if (customLifecycleMock) {
+    if (!isTestRuntime()) {
+      throw new Error('Lifecycle mock handler is strictly prohibited in production runtime.');
+    }
+    return await customLifecycleMock('review', params);
+  }
+
   const {
     contractId,
     milestoneId,
-    reviewerUserId,
     decision,
     feedback = '',
-    reviewerName,
     userIsOrgAdmin = false,
+    idempotencyKey,
   } = params;
 
-  const contract = await getContract(contractId);
-  if (!contract) {
-    throw new Error(`Contract ${contractId} not found.`);
-  }
-
-  // Pre-flight check
-  const authCheck = canReviewMilestone(contract, milestoneId, reviewerUserId, userIsOrgAdmin);
-  if (!authCheck.allowed) {
-    throw new Error(authCheck.reason || 'Unauthorized milestone review.');
-  }
-
-  if (decision === 'revision_requested' && (!feedback || feedback.trim().length === 0)) {
-    throw new Error('Constructive feedback explaining what revisions are required is mandatory.');
-  }
-
-  const milestoneIndex = contract.milestones.findIndex((m) => m.id === milestoneId);
-  const existingMilestone = contract.milestones[milestoneIndex];
-  const now = new Date().toISOString();
-
-  const newRevisionNumber = decision === 'revision_requested'
-    ? existingMilestone.revisionCount + 1
-    : existingMilestone.revisionCount;
-
-  const reviewRecord: ContractMilestoneReview = {
-    id: `rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-    revisionNumber: newRevisionNumber,
-    reviewedBy: reviewerUserId,
-    reviewerName: reviewerName || contract.creatorName || 'Opportunity Creator',
-    reviewedAt: now,
-    feedback: feedback.trim() || (decision === 'approved' ? 'Deliverables approved.' : 'Revisions requested.'),
+  const data = await postApi<{
+    success: boolean;
+    contract: GigLinkContract;
+    milestone: ContractMilestone;
+    decision: string;
+  }>('/api/contracts/milestones/review', {
+    contractId,
+    milestoneId,
     decision,
-    previousSubmissionNote: existingMilestone.submission?.deliveryNote || undefined,
-  };
+    feedback,
+    userIsOrgAdmin,
+    idempotencyKey,
+  });
 
-  const updatedReviewHistory = [...(existingMilestone.reviewHistory || []), reviewRecord];
-
-  let updatedMilestone: ContractMilestone;
-
-  if (decision === 'approved') {
-    updatedMilestone = {
-      ...existingMilestone,
-      status: 'completed',
-      reviewState: 'approved',
-      approvedAt: now,
-      reviewedAt: now,
-      reviewHistory: updatedReviewHistory,
-      updatedAt: now,
-    };
-  } else {
-    // Revision requested
-    updatedMilestone = {
-      ...existingMilestone,
-      status: 'in_progress',
-      reviewState: 'revision_requested',
-      revisionCount: newRevisionNumber,
-      reviewedAt: now,
-      reviewHistory: updatedReviewHistory,
-      updatedAt: now,
-    };
+  if (!data?.contract) {
+    throw new Error('Server API failed to return updated contract state.');
   }
 
-  const updatedMilestones = [...contract.milestones];
-  updatedMilestones[milestoneIndex] = updatedMilestone;
-
-  // If approved, automatically unlock/start the next milestone if currently pending
-  if (decision === 'approved' && milestoneIndex + 1 < updatedMilestones.length) {
-    const nextMilestone = updatedMilestones[milestoneIndex + 1];
-    if (nextMilestone.status === 'pending') {
-      updatedMilestones[milestoneIndex + 1] = {
-        ...nextMilestone,
-        status: 'in_progress',
-        updatedAt: now,
-      };
-    }
-  }
-
-  const updatedContract: GigLinkContract = {
-    ...contract,
-    milestones: updatedMilestones,
-    updatedAt: now,
+  contractsStore.set(data.contract.id, data.contract);
+  return {
+    contract: data.contract,
+    milestone: data.milestone,
+    decision: data.decision,
   };
-
-  await persistContract(updatedContract);
-  return { contract: updatedContract, milestone: updatedMilestone };
 }
 
 /**

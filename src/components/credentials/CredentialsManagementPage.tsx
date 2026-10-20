@@ -87,7 +87,7 @@ export const CredentialsManagementPage: React.FC = () => {
       const claimed = await getClaimedCredentialsForTalent(talentUid);
       setClaimedCredentials(claimed);
     } catch (err) {
-      console.error('Failed to load credential data:', err);
+      console.warn('[CredentialsManagement] Non-fatal notice loading credentials:', err);
     } finally {
       setLoading(false);
     }

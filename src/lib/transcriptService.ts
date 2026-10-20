@@ -214,10 +214,15 @@ export async function generateAndPublishTranscript(
  */
 export async function getTranscriptByTalentId(talentId: string): Promise<VerifiableTranscript | null> {
   if (!db) return null;
-  const docRef = doc(db, 'transcripts', `tr_${talentId}`);
-  const snap = await getDoc(docRef);
-  if (!snap.exists()) return null;
-  return snap.data() as VerifiableTranscript;
+  try {
+    const docRef = doc(db, 'transcripts', `tr_${talentId}`);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) return null;
+    return snap.data() as VerifiableTranscript;
+  } catch (err) {
+    console.warn('[TranscriptService] Transcript fetch notice for talent:', talentId, err);
+    return null;
+  }
 }
 
 /**

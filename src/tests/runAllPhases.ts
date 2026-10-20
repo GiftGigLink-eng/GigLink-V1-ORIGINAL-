@@ -23,6 +23,11 @@ import { runCeoStage2TestSuite } from './ceoStage2.test';
 import { runClientProfileUnificationTests } from './clientProfileUnification.test';
 import { runPhase2HiringAndAvatarTests } from './phase2HiringAndAvatar.test';
 import { runPhase3ClientPublicIdentityTests } from './phase3ClientPublicIdentity.test';
+import { runPhaseC1PaymentTestSuite } from './phaseC1PaymentHardening.test';
+import { runPhaseC2ATests } from './phaseC2AProviderNeutral.test';
+import { runPhaseC2B1Tests } from './phaseC2B1MilestoneLifecycle.test';
+import { runPhaseC2B2Tests } from './phaseC2B2VersionedSubmissions.test';
+import { runPhaseC2C1Tests } from './phaseC2C1PaystackIntegration.test';
 import {
   canSubmitMilestone,
   canReviewMilestone,
@@ -507,6 +512,51 @@ async function runAll() {
   grandTotal += ceoStage2.total;
   grandPassed += ceoStage2.passed;
   grandFailed += ceoStage2.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE C-1: Payment Foundation Hardening & Provider-Neutral Architecture
+  // -------------------------------------------------------------
+  const c1Res = await runPhaseC1PaymentTestSuite();
+  grandTotal += c1Res.total;
+  grandPassed += c1Res.passed;
+  grandFailed += c1Res.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE C-2A: Provider-Neutral Payment Architecture & State Model
+  // -------------------------------------------------------------
+  const c2aRes = await runPhaseC2ATests();
+  grandTotal += c2aRes.total;
+  grandPassed += c2aRes.passed;
+  grandFailed += c2aRes.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE C-2B-1: Server-Authoritative Milestone Lifecycle & Work State
+  // -------------------------------------------------------------
+  const c2b1Res = await runPhaseC2B1Tests();
+  grandTotal += c2b1Res.total;
+  grandPassed += c2b1Res.passed;
+  grandFailed += c2b1Res.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE C-2B-2: Versioned Submission Hardening & Immutability
+  // -------------------------------------------------------------
+  const c2b2Res = await runPhaseC2B2Tests();
+  grandTotal += c2b2Res.total;
+  grandPassed += c2b2Res.passed;
+  grandFailed += c2b2Res.failed;
+  console.log('');
+
+  // -------------------------------------------------------------
+  // PHASE C-2C-1: Paystack Adapter & Integration Verification
+  // -------------------------------------------------------------
+  const c2c1Res = await runPhaseC2C1Tests();
+  grandTotal += c2c1Res.total;
+  grandPassed += c2c1Res.passed;
+  grandFailed += c2c1Res.failed;
   console.log('');
 
   // -------------------------------------------------------------

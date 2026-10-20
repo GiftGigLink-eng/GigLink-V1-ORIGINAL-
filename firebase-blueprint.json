@@ -234,7 +234,7 @@
         "platformFeeAmount": { "type": "number" },
         "netTalentAmount": { "type": "number" },
         "type": { "type": "string", "enum": ["milestone_funded", "escrow_held", "milestone_released", "payout_initiated", "payout_completed", "refund_initiated", "refund_completed", "platform_fee"] },
-        "provider": { "type": "string", "enum": ["stripe", "simulated_stripe"] },
+        "provider": { "type": "string", "enum": ["stripe", "paystack", "test"] },
         "providerReference": { "type": "string", "maxLength": 256 },
         "providerEventId": { "type": "string", "maxLength": 256 },
         "status": { "type": "string", "enum": ["pending", "processing", "succeeded", "failed", "cancelled"] },
@@ -332,6 +332,38 @@
         "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "contractId", "authorId", "authorRole", "targetUserId", "ratingOverall", "ratingCommunication", "ratingQuality", "ratingTimeliness", "comment", "isPublic", "createdAt"]
+    },
+    "TalentPayoutAccount": {
+      "title": "Talent Payout Account",
+      "description": "Server-authoritative payout account metadata for multi-provider settlement",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "provider": { "type": "string", "enum": ["stripe", "paystack", "test"] },
+        "providerAccountReference": { "type": "string", "maxLength": 128 },
+        "country": { "type": "string", "maxLength": 10 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "status": { "type": "string", "enum": ["not_configured", "pending_verification", "ready", "processing", "paid"] },
+        "payoutsEnabled": { "type": "boolean" },
+        "chargesEnabled": { "type": "boolean" },
+        "detailsSubmitted": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["userId", "provider", "providerAccountReference", "country", "currency", "status", "payoutsEnabled", "createdAt", "updatedAt"]
+    },
+    "WebhookEvent": {
+      "title": "Webhook Event Record",
+      "description": "Idempotency audit store for inbound payment webhooks",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "maxLength": 128 },
+        "created": { "type": "number" },
+        "processedAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["processed", "ignored", "failed"] }
+      },
+      "required": ["id", "type", "created", "processedAt", "status"]
     }
   },
   "firestore": {
@@ -390,6 +422,20 @@
     "/feedback/{feedbackId}": {
       "schema": { "$ref": "#/entities/Feedback" },
       "description": "Verified feedback and ratings for completed contracts"
+    },
+    "/credentials/{credentialId}": {
+      "description": "W3C-compliant Verifiable Credentials and Institutional Attestations"
+    },
+    "/dids/{didId}": {
+      "description": "Decentralized Identifier (DID) Documents and cryptographic verification methods"
+    },
+    "/talentPayoutAccounts/{userId}": {
+      "schema": { "$ref": "#/entities/TalentPayoutAccount" },
+      "description": "Server-authoritative payout metadata (Read by owner and admin; mutations strictly server/admin only)"
+    },
+    "/webhookEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/WebhookEvent" },
+      "description": "Immutable webhook idempotency records"
     }
   }
 }

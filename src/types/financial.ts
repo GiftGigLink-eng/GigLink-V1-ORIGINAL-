@@ -2,6 +2,14 @@
  * Financial & Escrow Data Structures for GigLink V1 (Phase 4)
  */
 
+import {
+  MilestoneEscrowState,
+  TalentPayoutAccount,
+  PaymentProvider,
+} from './payment';
+
+export type { MilestoneEscrowState, TalentPayoutAccount, PaymentProvider };
+
 export type FinancialTransactionType =
   | 'milestone_funded'
   | 'escrow_held'
@@ -10,14 +18,21 @@ export type FinancialTransactionType =
   | 'payout_completed'
   | 'refund_initiated'
   | 'refund_completed'
-  | 'platform_fee';
+  | 'platform_fee'
+  | 'escrow_funding'
+  | 'escrow_release'
+  | 'escrow_refund'
+  | 'payout_disbursement';
 
 export type FinancialTransactionStatus =
   | 'pending'
   | 'processing'
   | 'succeeded'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  | 'held'
+  | 'released'
+  | 'refunded';
 
 export type EscrowDisputeStatus = 'none' | 'disputed' | 'resolved_released' | 'resolved_refunded';
 
@@ -26,7 +41,7 @@ export type TalentPayoutStatus = 'not_configured' | 'pending_verification' | 're
 export interface MilestonePaymentDetails {
   amount: number;
   currency: string;
-  paymentState: 'unfunded' | 'held' | 'released' | 'refunded';
+  paymentState: MilestoneEscrowState;
   fundedAt?: string | null;
   releasedAt?: string | null;
   refundedAt?: string | null;
@@ -34,9 +49,21 @@ export interface MilestonePaymentDetails {
   payerName?: string;
   recipientId?: string; // Talent user ID
   recipientName?: string;
-  paymentIntentId?: string; // Stripe PaymentIntent ID
-  transferId?: string; // Stripe Transfer ID
-  refundId?: string; // Stripe Refund ID
+
+  // Provider-Neutral Settlement References
+  paymentProvider?: PaymentProvider;
+  providerPaymentReference?: string | null;
+  providerPayoutReference?: string | null;
+  providerRefundReference?: string | null;
+
+  // Backward-compatibility aliases for legacy callers (deprecated)
+  /** @deprecated Use providerPaymentReference */
+  paymentIntentId?: string; // Provider Payment Intent ID / Reference
+  /** @deprecated Use providerPayoutReference */
+  transferId?: string; // Provider Payout / Transfer ID
+  /** @deprecated Use providerRefundReference */
+  refundId?: string; // Provider Refund ID
+
   disputeStatus?: EscrowDisputeStatus;
   disputeReason?: string | null;
   disputedAt?: string | null;
@@ -59,18 +86,27 @@ export interface FinancialLedgerRecord {
   platformFeeAmount: number; // E.g. 50
   netTalentAmount: number; // E.g. 950
   type: FinancialTransactionType;
-  provider: 'stripe' | 'simulated_stripe';
-  providerReference?: string | null; // PaymentIntent ID, Transfer ID, Refund ID, or charge ID
+  provider: PaymentProvider | 'simulated_stripe';
+  providerReference?: string | null; // Canonical provider reference
+  providerPaymentReference?: string | null;
+  providerPayoutReference?: string | null;
+  providerRefundReference?: string | null;
   providerEventId?: string | null; // Webhook event ID for idempotency tracking
   status: FinancialTransactionStatus;
   description: string;
+  failureReason?: string | null;
+  platformFee?: number;
   metadata?: Record<string, any>;
   createdAt: string;
   completedAt?: string | null;
 }
 
-export interface StripeWebhookEventRecord {
-  id: string; // Stripe event ID e.g. evt_12345
+/**
+ * Provider-Neutral Webhook Event Persistence Record
+ */
+export interface ProviderWebhookEventRecord {
+  id: string; // Unique provider event ID e.g. evt_12345 or paystack evt
+  provider?: PaymentProvider;
   type: string;
   created: number;
   processedAt: string;
@@ -79,8 +115,19 @@ export interface StripeWebhookEventRecord {
   milestoneId?: string;
   transactionId?: string;
   error?: string | null;
+  failureReason?: string | null;
 }
 
+/**
+ * Backward-compatibility alias for Stripe webhook event records
+ * @deprecated Use ProviderWebhookEventRecord
+ */
+export type StripeWebhookEventRecord = ProviderWebhookEventRecord;
+
+/**
+ * Backward-compatibility interface for legacy TalentStripeAccount callers
+ * @deprecated Use TalentPayoutAccount from ./payment
+ */
 export interface TalentStripeAccount {
   userId: string;
   stripeAccountId: string;

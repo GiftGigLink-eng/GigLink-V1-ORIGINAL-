@@ -17,7 +17,7 @@ import {
   applyActionCode,
   updateProfile,
 } from 'firebase/auth';
-import { doc, setDoc, deleteDoc, onSnapshot, getDocFromServer } from 'firebase/firestore';
+import { doc, setDoc, deleteDoc, onSnapshot, getDoc } from 'firebase/firestore';
 import { auth, db } from '../config/firebase';
 import {
   UserProfile,
@@ -64,6 +64,8 @@ export function getAuthErrorMessage(error: any): string {
     case 'auth/wrong-password':
     case 'auth/invalid-credential':
       return 'Invalid email or password. Please check your credentials or create a new account.';
+    case 'auth/user-disabled':
+      return 'This account has been disabled. Please contact platform support or an administrator.';
     case 'auth/too-many-requests':
       return 'Too many failed attempts. Access temporarily disabled. Try again later or reset password.';
     case 'auth/expired-action-code':
@@ -238,17 +240,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let isMounted = true;
     async function testConnection() {
       try {
-        await getDocFromServer(doc(db, 'publicTrustPassports', 'connection-probe'));
+        await getDoc(doc(db, 'publicTrustPassports', 'connection-probe'));
         if (isMounted) setFirestoreConnected(true);
       } catch (error: any) {
         if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.warn('[Firestore] Client operating in offline mode while connecting to backend.');
           if (isMounted) setFirestoreConnected(false);
-        } else if (error?.code === 'permission-denied') {
-          // Connected to backend and permission check executed
-          if (isMounted) setFirestoreConnected(true);
         } else {
-          // Other responses indicate server reached
+          // Other responses indicate server reached or permission checked
           if (isMounted) setFirestoreConnected(true);
         }
       }
@@ -503,8 +501,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signInWithEmail = async (email: string, pass: string) => {
     try {
       await signInWithEmailAndPassword(auth, email, pass);
-    } catch (error) {
-      console.error('Sign in failed:', error);
+    } catch (error: any) {
+      if (
+        error?.code === 'auth/invalid-credential' ||
+        error?.code === 'auth/user-not-found' ||
+        error?.code === 'auth/wrong-password' ||
+        error?.code === 'auth/invalid-email'
+      ) {
+        console.warn('[AuthContext] Sign in rejected invalid credentials:', error?.code);
+      } else {
+        console.error('Sign in failed:', error);
+      }
       throw error;
     }
   };

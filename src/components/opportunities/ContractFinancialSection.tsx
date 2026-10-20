@@ -28,7 +28,7 @@ import {
   ContractMilestone,
   FinancialLedgerRecord,
   ContractFinancialSummary,
-  TalentStripeAccount,
+  TalentPayoutAccount,
 } from '../../types';
 import {
   deriveContractFinancialSummary,
@@ -57,7 +57,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
 }) => {
   const [ledger, setLedger] = useState<FinancialLedgerRecord[]>([]);
   const [loadingLedger, setLoadingLedger] = useState<boolean>(true);
-  const [payoutAccount, setPayoutAccount] = useState<TalentStripeAccount | null>(null);
+  const [payoutAccount, setPayoutAccount] = useState<TalentPayoutAccount | null>(null);
   const [loadingPayout, setLoadingPayout] = useState<boolean>(false);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -65,6 +65,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
   const [showLedgerDetails, setShowLedgerDetails] = useState<boolean>(false);
   const [fundingModalMilestone, setFundingModalMilestone] = useState<ContractMilestone | null>(null);
   const [refundModalMilestone, setRefundModalMilestone] = useState<ContractMilestone | null>(null);
+  const [releaseModalMilestone, setReleaseModalMilestone] = useState<ContractMilestone | null>(null);
   const [refundReason, setRefundReason] = useState<string>('');
 
   const summary: ContractFinancialSummary = deriveContractFinancialSummary(contract, ledger);
@@ -126,7 +127,9 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
       const confirmData = await postApi('/api/payments/confirm-funding', {
         contractId: contract.id,
         milestoneId: milestone.id,
-        paymentIntentId: initData.paymentIntentId,
+        providerPaymentReference: initData.providerPaymentReference || initData.paymentIntentId,
+        paymentReference: initData.paymentReference || initData.providerPaymentReference || initData.paymentIntentId,
+        paymentIntentId: initData.paymentIntentId || initData.providerPaymentReference,
         clientId: currentUserId,
         clientName: contract.creatorName,
         amount: milestone.amount,
@@ -148,12 +151,13 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
     }
   };
 
-  // Client Action: Release Milestone Escrow Funds to Talent
-  const handleReleaseMilestone = async (milestone: ContractMilestone) => {
-    if (!window.confirm(`Are you sure you want to release $${milestone.amount} ${milestone.currency} to ${contract.talentName || 'Talent'}? This cannot be undone.`)) {
-      return;
-    }
+  // Client Action: Open Release Modal
+  const handleReleaseMilestone = (milestone: ContractMilestone) => {
+    setReleaseModalMilestone(milestone);
+  };
 
+  // Client Action: Execute Confirmed Release of Escrow Funds to Talent
+  const executeReleaseMilestone = async (milestone: ContractMilestone) => {
     setActionError(null);
     setActionSuccess(null);
     setActionLoadingId(milestone.id);
@@ -170,6 +174,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
       }
 
       setActionSuccess(`Payment of $${milestone.amount} ${milestone.currency} released to talent.`);
+      setReleaseModalMilestone(null);
       onContractUpdated(data.contract);
       await fetchLedger();
     } catch (err: any) {
@@ -211,7 +216,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
     }
   };
 
-  // Talent Action: Connect Stripe Payout Account
+  // Talent Action: Connect Payout Account
   const handleConnectPayoutAccount = async () => {
     setActionError(null);
     setActionSuccess(null);
@@ -229,7 +234,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
       }
 
       setPayoutAccount(data.account);
-      setActionSuccess('Stripe Connect payout account linked. Released funds will be automatically transferred.');
+      setActionSuccess('Payment provider connected. Released funds will be automatically transferred.');
     } catch (err: any) {
       setActionError(err.message || 'Failed to set up payout account.');
     } finally {
@@ -252,7 +257,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
             <h2 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <span>Financial Settlement & Escrow</span>
               <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                Stripe Protected
+                Escrow Protected
               </span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
@@ -261,13 +266,13 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
           </div>
         </div>
 
-        {/* Talent Stripe Payout Setup Badge */}
+        {/* Talent Payout Setup Badge */}
         {isTalent && (
           <div className="shrink-0">
             {payoutAccount ? (
               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Payouts Active ({payoutAccount.stripeAccountId.substring(0, 12)}...)</span>
+                <span>Payment provider connected ({(payoutAccount.providerAccountReference || payoutAccount.stripeAccountId || '').substring(0, 12)}...)</span>
               </div>
             ) : (
               <button
@@ -278,7 +283,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold transition-colors cursor-pointer"
               >
                 <CreditCard className="w-3.5 h-3.5" />
-                <span>{loadingPayout ? 'Connecting...' : 'Set Up Stripe Payouts'}</span>
+                <span>{loadingPayout ? 'Connecting...' : 'Set Up Payout Account'}</span>
               </button>
             )}
           </div>
@@ -357,12 +362,12 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
 
         <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden">
           {contract.milestones.map((m, idx) => {
-            const isHeld = m.paymentState === 'held';
-            const isReleased = m.paymentState === 'released';
-            const isUnfunded = m.paymentState === 'unfunded';
-            const isRefunded = m.paymentState === 'refunded';
+            const isHeld = m.paymentState === 'held' || m.paymentState === 'release_pending';
+            const isReleased = m.paymentState === 'released' || m.paymentState === 'payout_pending' || m.paymentState === 'paid_out';
+            const isUnfunded = m.paymentState === 'unfunded' || m.paymentState === 'funding_pending' || m.paymentState === 'funding_failed';
+            const isRefunded = m.paymentState === 'refunded' || m.paymentState === 'refund_pending';
             const isApproved = m.reviewState === 'approved' || m.status === 'completed';
-            const isEligibleForRelease = isHeld && isApproved;
+            const isEligibleForRelease = m.paymentState === 'held' && isApproved;
             const feeInfo = calculatePlatformFee(m.amount);
             const isLoadingThis = actionLoadingId === m.id;
 
@@ -430,7 +435,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
                   )}
 
                   {/* Client: Release Funds if Approved & Held */}
-                  {isManager && isHeld && isApproved && (
+                  {isManager && isEligibleForRelease && (
                     <button
                       type="button"
                       id={`release-payment-btn-${m.id}`}
@@ -556,7 +561,7 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
                   Fund Milestone Escrow
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Stripe Payment & Secure Escrow Deposit
+                  Secure Escrow Deposit
                 </p>
               </div>
             </div>
@@ -653,6 +658,69 @@ export const ContractFinancialSection: React.FC<ContractFinancialSectionProps> =
                 className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 transition-colors min-h-[44px]"
               >
                 {actionLoadingId === refundModalMilestone.id ? 'Processing...' : `Refund $${refundModalMilestone.amount}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Release Confirmation Modal */}
+      {releaseModalMilestone && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center font-bold shrink-0">
+                <Unlock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  Authorize Milestone Escrow Release
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Release held escrow funds for approved deliverables
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2 text-xs">
+              <div className="flex justify-between items-center font-semibold">
+                <span className="text-slate-600 dark:text-slate-400">Milestone:</span>
+                <span className="text-slate-900 dark:text-white">{releaseModalMilestone.title}</span>
+              </div>
+              <div className="flex justify-between items-center font-semibold">
+                <span className="text-slate-600 dark:text-slate-400">Gross Amount:</span>
+                <span className="text-emerald-600 font-bold">${releaseModalMilestone.amount} {releaseModalMilestone.currency || 'USD'}</span>
+              </div>
+              <div className="flex justify-between items-center text-[11px] text-slate-500">
+                <span>Platform Fee (5%):</span>
+                <span>${calculatePlatformFee(releaseModalMilestone.amount).platformFeeAmount}</span>
+              </div>
+              <div className="flex justify-between items-center text-xs font-bold text-emerald-600 border-t border-slate-200 dark:border-slate-800 pt-1.5">
+                <span>Net Talent Payout:</span>
+                <span>${calculatePlatformFee(releaseModalMilestone.amount).netTalentAmount}</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              Are you sure you want to release these funds to <strong>{contract.talentName || 'Talent'}</strong>? This will initiate payout of the held escrow funds. This action is final and cannot be undone.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setReleaseModalMilestone(null)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors min-h-[44px]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                id="confirm-escrow-release-btn"
+                disabled={actionLoadingId === releaseModalMilestone.id}
+                onClick={() => executeReleaseMilestone(releaseModalMilestone)}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-colors min-h-[44px] cursor-pointer shadow-xs"
+              >
+                {actionLoadingId === releaseModalMilestone.id ? 'Releasing...' : `Release $${releaseModalMilestone.amount} to Talent`}
               </button>
             </div>
           </div>

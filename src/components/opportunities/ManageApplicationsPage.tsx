@@ -54,11 +54,32 @@ export const ManageApplicationsPage: React.FC = () => {
       const opp = await getOpportunityById(id);
       setOpportunity(opp);
 
-      const creatorId = opp?.creatorId || user?.uid;
-      const apps = await getApplicationsForOpportunity(id, creatorId);
+      if (!opp) {
+        setLoadError({
+          message: 'Opportunity not found.',
+          isNetwork: false,
+          isAuth: false,
+        });
+        return;
+      }
+
+      // Authoritative creator/admin check before querying protected applications
+      const isUserCreator = Boolean(
+        user && (opp.creatorId === user.uid || (user as any).isAdmin || (user as any).isTokenAdmin)
+      );
+
+      if (!isUserCreator) {
+        setLoadError({
+          message: 'You do not have permission to view applications for this listing.',
+          isNetwork: false,
+          isAuth: true,
+        });
+        return;
+      }
+
+      const apps = await getApplicationsForOpportunity(id, user?.uid);
       setApplications(apps);
     } catch (err: any) {
-      console.error('Error loading applications:', err);
       const errMsg = (err?.message || String(err)).toLowerCase();
       const errCode = (err?.code || '').toLowerCase();
       const isNetwork =
@@ -73,6 +94,12 @@ export const ManageApplicationsPage: React.FC = () => {
         errCode.includes('unauthenticated') ||
         errMsg.includes('permission') ||
         errMsg.includes('unauthorized');
+
+      if (isAuth) {
+        console.warn('[ManageApplicationsPage] Unauthorized to view applications:', err?.message || errCode);
+      } else {
+        console.error('Error loading applications:', err);
+      }
 
       setLoadError({
         message: isNetwork
@@ -216,16 +243,45 @@ export const ManageApplicationsPage: React.FC = () => {
         )}
       </div>
 
-      {activeTab === 'proposals' && opportunity && (
+      {loadError && (
+        <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-10 sm:p-12 text-center shadow-xs mb-8">
+          <div className="w-14 h-14 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-rose-200 dark:border-rose-800/50">
+            <AlertCircle className="w-7 h-7" />
+          </div>
+          <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mb-2">
+            {loadError.isNetwork
+              ? 'Connection Interrupted'
+              : loadError.isAuth
+              ? 'Access Denied'
+              : 'Unable to Load Pipeline'}
+          </h3>
+          <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
+            {loadError.message}
+          </p>
+          {!loadError.isAuth && (
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={() => loadData()}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Retry</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!loadError && activeTab === 'proposals' && opportunity && (
         <OpportunityProposalsSection
           opportunity={opportunity}
           currentUserId={user?.uid || ''}
-          isCreator={true}
+          isCreator={Boolean(user && (opportunity.creatorId === user.uid || (user as any).isAdmin || (user as any).isTokenAdmin))}
           onOpportunityUpdated={loadData}
         />
       )}
 
-      {activeTab === 'applications' && (
+      {!loadError && activeTab === 'applications' && (
         <>
           {/* Applications List */}
           {loading ? (
@@ -236,33 +292,6 @@ export const ManageApplicationsPage: React.FC = () => {
                   className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 animate-pulse h-40"
                 />
               ))}
-            </div>
-          ) : loadError ? (
-            <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900/50 rounded-3xl p-10 sm:p-12 text-center shadow-xs">
-              <div className="w-14 h-14 bg-rose-50 dark:bg-rose-950/40 text-rose-600 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-rose-200 dark:border-rose-800/50">
-                <AlertCircle className="w-7 h-7" />
-              </div>
-              <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mb-2">
-                {loadError.isNetwork
-                  ? 'Connection Interrupted'
-                  : loadError.isAuth
-                  ? 'Access Denied'
-                  : 'Unable to Load Applicants'}
-              </h3>
-              <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 max-w-md mx-auto mb-6 leading-relaxed">
-                {loadError.message}
-              </p>
-              {!loadError.isAuth && (
-                <div className="flex items-center justify-center gap-3">
-                  <button
-                    onClick={() => loadData()}
-                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 transition-colors shadow-xs min-h-[44px]"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    <span>Retry</span>
-                  </button>
-                </div>
-              )}
             </div>
           ) : filteredApplications.length === 0 ? (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-12 text-center">

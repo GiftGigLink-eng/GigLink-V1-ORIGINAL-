@@ -32,6 +32,10 @@ import {
   Users,
   Briefcase,
   FileText,
+  Play,
+  Plus,
+  Trash2,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -42,10 +46,12 @@ import {
 import {
   acceptContract,
   proposeContractTerms,
+  startMilestoneWork,
   submitMilestoneDeliverable,
   reviewMilestoneDeliverable,
   submitFinalHandover,
   acceptFinalHandover,
+  canStartMilestone,
   canSubmitMilestone,
   canReviewMilestone,
   getContractProgress,
@@ -53,6 +59,7 @@ import {
 } from '../../lib/contractService';
 import {
   GigLinkContract,
+  ContractMilestone,
   ApplicationHandoffData,
   MessageContextType,
 } from '../../types';
@@ -68,8 +75,14 @@ export const AcceptedHandoffPage: React.FC = () => {
   }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, profile, activePersona } = useAuth();
   const { showToast } = useToast();
+
+  const userIsOrgAdmin = Boolean(
+    activePersona === 'organization_admin' ||
+    profile?.activePersona === 'organization_admin' ||
+    profile?.availablePersonas?.includes('organization_admin')
+  );
 
   const effectiveAppId = routeAppId || (routeOppId && user?.uid ? `${routeOppId}_${user.uid}` : '');
 
@@ -119,12 +132,16 @@ export const AcceptedHandoffPage: React.FC = () => {
   const [showSignModal, setShowSignModal] = useState(false);
 
   // Active Milestone Submission Form States
+  const [isStartingMilestoneId, setIsStartingMilestoneId] = useState<string | null>(null);
   const [submittingMilestoneId, setSubmittingMilestoneId] = useState<string | null>(null);
   const [deliveryNotes, setDeliveryNotes] = useState('');
   const [demoUrl, setDemoUrl] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [figmaUrl, setFigmaUrl] = useState('');
-  const [additionalLink, setAdditionalLink] = useState('');
+  const [additionalLinks, setAdditionalLinks] = useState<string[]>([]);
+  const [evidenceFiles, setEvidenceFiles] = useState<string[]>([]);
+  const [submissionIdempotencyKey, setSubmissionIdempotencyKey] = useState<string | null>(null);
+  const [formValidationErrors, setFormValidationErrors] = useState<Record<string, string>>({});
   const [isSubmittingWork, setIsSubmittingWork] = useState(false);
 
   // Active Milestone Review Form States
@@ -132,8 +149,63 @@ export const AcceptedHandoffPage: React.FC = () => {
   const [revisionFeedback, setRevisionFeedback] = useState('');
   const [isReviewingWork, setIsReviewingWork] = useState(false);
 
+  // Active Milestone Dispute Modal States
+  const [disputeModalMilestone, setDisputeModalMilestone] = useState<ContractMilestone | null>(null);
+  const [disputeFeedback, setDisputeFeedback] = useState('');
+  const [isDisputingWork, setIsDisputingWork] = useState(false);
+
   // Expanded History Drawers
   const [expandedHistoryMilestoneId, setExpandedHistoryMilestoneId] = useState<string | null>(null);
+
+  // Helper to generate unique idempotency keys per user action
+  const generateIdempotencyKey = (action: string, milestoneId: string) => {
+    const rand = Math.random().toString(36).substring(2, 10);
+    return `${action}_${milestoneId}_${Date.now()}_${rand}`;
+  };
+
+  // Client-side HTTPS URL validator
+  const validateHttpsUrl = (rawUrl: string, fieldName: string): { valid: boolean; error?: string } => {
+    const trimmed = rawUrl.trim();
+    if (!trimmed) return { valid: true };
+    if (trimmed.length > 1000) {
+      return { valid: false, error: `${fieldName} exceeds maximum length of 1,000 characters.` };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return { valid: false, error: `${fieldName} is not a valid URL. Must include full protocol (https://...).` };
+    }
+    if (parsed.protocol !== 'https:') {
+      return { valid: false, error: `${fieldName} must use HTTPS protocol (https://...).` };
+    }
+    return { valid: true };
+  };
+
+  // Helper for 14-day deadline display
+  const getReviewDeadlineInfo = (reviewDeadlineAt?: string | null) => {
+    if (!reviewDeadlineAt) {
+      return { isOverdue: false, daysRemaining: 14, displayText: '14 calendar days' };
+    }
+    const deadlineTime = new Date(reviewDeadlineAt).getTime();
+    const diffMs = deadlineTime - Date.now();
+
+    if (diffMs <= 0) {
+      const daysOverdue = Math.max(1, Math.floor(Math.abs(diffMs) / (1000 * 60 * 60 * 24)));
+      return {
+        isOverdue: true,
+        daysRemaining: 0,
+        displayText: daysOverdue === 1 ? 'Review Overdue (1 day past deadline)' : `Review Overdue (${daysOverdue} days past deadline)`,
+      };
+    }
+
+    const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    return {
+      isOverdue: false,
+      daysRemaining,
+      displayText: daysRemaining === 1 ? '1 day remaining' : `${daysRemaining} days remaining`,
+    };
+  };
 
   // Final Handover Submission State
   const [showFinalHandoverForm, setShowFinalHandoverForm] = useState(false);
@@ -199,7 +271,7 @@ export const AcceptedHandoffPage: React.FC = () => {
     else setRefreshing(true);
 
     try {
-      const result = await getHandoffWorkspace(effectiveAppId, user.uid);
+      const result = await getHandoffWorkspace(effectiveAppId, user.uid, userIsOrgAdmin);
       setWorkspaceResult(result);
       if (result.contract) {
         setContract(result.contract);
@@ -243,7 +315,11 @@ export const AcceptedHandoffPage: React.FC = () => {
   }, [effectiveAppId, user?.uid]);
 
   const handoffData: ApplicationHandoffData | undefined = workspaceResult?.handoffData;
-  const isManager = workspaceResult?.isCreator ?? (contract ? user?.uid === contract.creatorId : false);
+  const isManager = workspaceResult?.isCreator ?? (
+    contract
+      ? user?.uid === contract.creatorId || Boolean(userIsOrgAdmin && contract.organizationId)
+      : false
+  );
   const isTalent = workspaceResult?.isApplicant ?? (contract ? user?.uid === contract.talentId : false);
 
   // Progress metrics from contract service
@@ -305,13 +381,95 @@ export const AcceptedHandoffPage: React.FC = () => {
     }
   };
 
+  // Handle Milestone Work Start (Partner)
+  const handleStartMilestone = async (milestoneId: string) => {
+    if (!contract || !user?.uid) return;
+
+    setIsStartingMilestoneId(milestoneId);
+    try {
+      const idempotencyKey = generateIdempotencyKey('start', milestoneId);
+      const res = await startMilestoneWork({
+        contractId: contract.id,
+        milestoneId,
+        partnerUserId: user.uid,
+        idempotencyKey,
+      });
+
+      setContract(res.contract);
+      showToast('Milestone work officially started! You can now prepare and submit deliverables.', 'success');
+    } catch (err: any) {
+      showToast(err?.message || 'Failed to start milestone work.', 'error');
+    } finally {
+      setIsStartingMilestoneId(null);
+    }
+  };
+
   // Handle Milestone Deliverable Submission
   const handleSubmitDeliverable = async (milestoneId: string) => {
     if (!contract || !user?.uid) return;
-    if (!deliveryNotes.trim()) {
-      showToast('Please provide a delivery note describing the completed work.', 'error');
+
+    const trimmedNotes = deliveryNotes.trim();
+    const errors: Record<string, string> = {};
+
+    if (!trimmedNotes || trimmedNotes.length < 15) {
+      errors.deliveryNotes = 'Delivery note must be at least 15 characters.';
+    } else if (trimmedNotes.length > 5000) {
+      errors.deliveryNotes = 'Delivery note cannot exceed 5,000 characters.';
+    }
+
+    if (demoUrl.trim()) {
+      const v = validateHttpsUrl(demoUrl, 'Live Demo URL');
+      if (!v.valid) errors.demoUrl = v.error!;
+    }
+
+    if (repoUrl.trim()) {
+      const v = validateHttpsUrl(repoUrl, 'Repository URL');
+      if (!v.valid) errors.repoUrl = v.error!;
+    }
+
+    if (figmaUrl.trim()) {
+      const v = validateHttpsUrl(figmaUrl, 'Figma URL');
+      if (!v.valid) errors.figmaUrl = v.error!;
+    }
+
+    const cleanAdditionalLinks: string[] = [];
+    additionalLinks.forEach((link, idx) => {
+      const t = link.trim();
+      if (t) {
+        const v = validateHttpsUrl(t, `Additional Link #${idx + 1}`);
+        if (!v.valid) errors[`additionalLink_${idx}`] = v.error!;
+        cleanAdditionalLinks.push(t);
+      }
+    });
+
+    const cleanEvidenceFiles: string[] = [];
+    evidenceFiles.forEach((fileUrl, idx) => {
+      const t = fileUrl.trim();
+      if (t) {
+        const v = validateHttpsUrl(t, `Evidence Link #${idx + 1}`);
+        if (!v.valid) errors[`evidenceFile_${idx}`] = v.error!;
+        cleanEvidenceFiles.push(t);
+      }
+    });
+
+    if (cleanAdditionalLinks.length > 10) {
+      errors.additionalLinks = 'A maximum of 10 additional links is permitted.';
+    }
+
+    if (cleanEvidenceFiles.length > 10) {
+      errors.evidenceFiles = 'A maximum of 10 evidence links is permitted.';
+    }
+
+    setFormValidationErrors(errors);
+
+    if (Object.keys(errors).length > 0) {
+      const firstError = Object.values(errors)[0];
+      showToast(firstError, 'error');
       return;
     }
+
+    const key = submissionIdempotencyKey || generateIdempotencyKey('submit', milestoneId);
+    setSubmissionIdempotencyKey(key);
 
     setIsSubmittingWork(true);
     try {
@@ -320,12 +478,14 @@ export const AcceptedHandoffPage: React.FC = () => {
         milestoneId,
         talentUserId: user.uid,
         submission: {
-          deliveryNote: deliveryNotes.trim(),
+          deliveryNote: trimmedNotes,
           demoUrl: demoUrl.trim() || undefined,
           repoUrl: repoUrl.trim() || undefined,
           figmaUrl: figmaUrl.trim() || undefined,
-          links: additionalLink.trim() ? [additionalLink.trim()] : undefined,
+          links: cleanAdditionalLinks.length > 0 ? cleanAdditionalLinks : undefined,
+          evidenceFiles: cleanEvidenceFiles.length > 0 ? cleanEvidenceFiles : undefined,
         },
+        idempotencyKey: key,
       });
 
       setContract(res.contract);
@@ -334,8 +494,11 @@ export const AcceptedHandoffPage: React.FC = () => {
       setDemoUrl('');
       setRepoUrl('');
       setFigmaUrl('');
-      setAdditionalLink('');
-      showToast('Milestone deliverable submitted for client review!', 'success');
+      setAdditionalLinks([]);
+      setEvidenceFiles([]);
+      setSubmissionIdempotencyKey(null);
+      setFormValidationErrors({});
+      showToast(`Milestone deliverable version ${res.submissionVersion || 1} submitted for client review!`, 'success');
     } catch (err: any) {
       showToast(err?.message || 'Failed to submit milestone deliverable.', 'error');
     } finally {
@@ -343,41 +506,57 @@ export const AcceptedHandoffPage: React.FC = () => {
     }
   };
 
-  // Handle Milestone Review (Approve or Request Revision)
+  // Handle Milestone Review (Approve, Request Revision, or Raise Dispute)
   const handleReviewDeliverable = async (
     milestoneId: string,
-    decision: 'approved' | 'revision_requested'
+    decision: 'approved' | 'revision_requested' | 'disputed',
+    customFeedback?: string
   ) => {
     if (!contract || !user?.uid) return;
-    if (decision === 'revision_requested' && !revisionFeedback.trim()) {
-      showToast('Please specify the required adjustments in the feedback note.', 'error');
+    const effectiveFeedback = customFeedback ?? revisionFeedback;
+
+    if (decision === 'revision_requested' && (!effectiveFeedback.trim() || effectiveFeedback.trim().length < 15)) {
+      showToast('Please specify actionable revision requirements (at least 15 characters) in the feedback note.', 'error');
+      return;
+    }
+
+    if (decision === 'disputed' && (!effectiveFeedback.trim() || effectiveFeedback.trim().length < 15)) {
+      showToast('Please provide an actionable dispute reason (at least 15 characters).', 'error');
       return;
     }
 
     setIsReviewingWork(true);
     try {
+      const idempotencyKey = generateIdempotencyKey(`review_${decision}`, milestoneId);
       const res = await reviewMilestoneDeliverable({
         contractId: contract.id,
         milestoneId,
         reviewerUserId: user.uid,
         decision,
-        feedback: revisionFeedback.trim() || undefined,
+        feedback: effectiveFeedback.trim() || undefined,
         reviewerName: user.displayName || contract.creatorName,
-        userIsOrgAdmin: isManager,
+        userIsOrgAdmin: isManager && user.uid !== contract.creatorId,
+        idempotencyKey,
       });
 
       setContract(res.contract);
       setReviewingMilestoneId(null);
       setRevisionFeedback('');
+      setDisputeModalMilestone(null);
+      setDisputeFeedback('');
+
       if (decision === 'approved') {
-        showToast('Milestone deliverable approved!', 'success');
+        showToast('Milestone deliverable approved! Payment release is now authorized in the Financials tab.', 'success');
+      } else if (decision === 'disputed') {
+        showToast('Milestone flagged for dispute resolution. Escrow release is frozen.', 'info');
       } else {
-        showToast('Revision request sent to talent.', 'info');
+        showToast('Revision request sent to partner.', 'info');
       }
     } catch (err: any) {
       showToast(err?.message || 'Failed to record milestone review.', 'error');
     } finally {
       setIsReviewingWork(false);
+      setIsDisputingWork(false);
     }
   };
 
@@ -1293,14 +1472,32 @@ export const AcceptedHandoffPage: React.FC = () => {
         ) : (
           <div className="space-y-4">
             {filteredMilestones.map((milestone, idx) => {
-              const isApproved = milestone.reviewState === 'approved';
-              const isInReview = milestone.reviewState === 'submitted' || milestone.reviewState === 'in_review';
-              const isRevision = milestone.reviewState === 'revision_requested';
+              const effectiveWorkState = milestone.workState || (
+                milestone.reviewState === 'approved' ? 'approved' :
+                milestone.status === 'completed' ? 'approved' :
+                milestone.reviewState === 'revision_requested' ? 'revision_requested' :
+                (milestone.reviewState === 'submitted' || milestone.reviewState === 'in_review') ? 'submitted' :
+                milestone.status === 'in_progress' ? 'in_progress' : 'ready_to_start'
+              );
+              const isApproved = effectiveWorkState === 'approved';
+              const isInReview = effectiveWorkState === 'submitted';
+              const isRevision = effectiveWorkState === 'revision_requested';
+              const isInProgress = effectiveWorkState === 'in_progress';
+              const isReadyToStart = effectiveWorkState === 'ready_to_start';
               const isSubmittingThis = submittingMilestoneId === milestone.id;
               const isReviewingThis = reviewingMilestoneId === milestone.id;
               const isHistoryExpanded = expandedHistoryMilestoneId === milestone.id;
 
+              const latestSubmission = (milestone.submissions && milestone.submissions.length > 0)
+                ? milestone.submissions[milestone.submissions.length - 1]
+                : milestone.submission;
+
+              const deadlineInfo = getReviewDeadlineInfo(milestone.reviewDeadlineAt);
+
               // Check permissions
+              const startPermission = contract && user?.uid
+                ? canStartMilestone(contract, milestone.id, user.uid)
+                : { allowed: false, reason: 'Not loaded' };
               const submitPermission = contract && user?.uid
                 ? canSubmitMilestone(contract, milestone.id, user.uid)
                 : { allowed: false, reason: 'Not loaded' };
@@ -1328,7 +1525,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                             Milestone {idx + 1} of {contract?.milestones.length || 0}
                           </span>
 
-                          {/* Review State Badge */}
+                          {/* Work State Badge */}
                           <span
                             className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full border uppercase tracking-wider flex items-center gap-1 ${
                               isApproved
@@ -1337,7 +1534,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                                 ? 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300'
                                 : isRevision
                                 ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300'
-                                : milestone.status === 'in_progress'
+                                : isInProgress
                                 ? 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/40 dark:text-sky-300'
                                 : 'bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-400'
                             }`}
@@ -1345,14 +1542,17 @@ export const AcceptedHandoffPage: React.FC = () => {
                             {isApproved && <CheckCircle2 className="w-3 h-3 text-emerald-600" />}
                             {isInReview && <Clock className="w-3 h-3 text-indigo-600" />}
                             {isRevision && <AlertTriangle className="w-3 h-3 text-amber-600" />}
+                            {isInProgress && <Play className="w-3 h-3 text-sky-600" />}
                             <span>
                               {isApproved
-                                ? 'Approved'
+                                ? `Approved${milestone.approvedVersion ? ` (V${milestone.approvedVersion})` : ''}`
                                 : isInReview
-                                ? 'Under Review'
+                                ? `Submitted (V${milestone.submissions?.length || 1})`
                                 : isRevision
                                 ? `Revision Requested (${milestone.revisionCount || 1})`
-                                : milestone.status.replace('_', ' ')}
+                                : isInProgress
+                                ? 'In Progress'
+                                : 'Ready to Start'}
                             </span>
                           </span>
 
@@ -1366,7 +1566,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                           {milestone.paymentState && (
                             <span
                               className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider flex items-center gap-1 ${
-                                milestone.paymentState === 'released'
+                                milestone.paymentState === 'released' || milestone.paymentState === 'paid_out'
                                   ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300'
                                   : milestone.paymentState === 'held'
                                   ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300'
@@ -1375,7 +1575,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                                   : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300'
                               }`}
                             >
-                              {milestone.paymentState === 'released' ? (
+                              {milestone.paymentState === 'released' || milestone.paymentState === 'paid_out' ? (
                                 <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                               ) : milestone.paymentState === 'held' ? (
                                 <Lock className="w-3 h-3 text-amber-600" />
@@ -1406,14 +1606,31 @@ export const AcceptedHandoffPage: React.FC = () => {
 
                       {/* Milestone Action Trigger Buttons */}
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        {/* Talent: Submit Deliverable Trigger */}
-                        {isTalent && isContractActive && !isApproved && (
+                        {/* Talent: Start Milestone Trigger */}
+                        {isTalent && isContractActive && isReadyToStart && (
+                          <button
+                            type="button"
+                            disabled={!startPermission.allowed || isStartingMilestoneId === milestone.id}
+                            onClick={() => handleStartMilestone(milestone.id)}
+                            title={!startPermission.allowed ? startPermission.reason : ''}
+                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors min-h-[40px] cursor-pointer shadow-xs"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>{isStartingMilestoneId === milestone.id ? 'Starting Work...' : 'Start Milestone'}</span>
+                          </button>
+                        )}
+
+                        {/* Talent: Submit Deliverable Trigger (Allowed ONLY in in_progress or revision_requested) */}
+                        {isTalent && isContractActive && !isApproved && (isInProgress || isRevision) && (
                           <button
                             type="button"
                             disabled={!submitPermission.allowed}
                             onClick={() => {
                               setSubmittingMilestoneId(isSubmittingThis ? null : milestone.id);
                               setReviewingMilestoneId(null);
+                              if (!isSubmittingThis) {
+                                setSubmissionIdempotencyKey(generateIdempotencyKey('submit', milestone.id));
+                              }
                             }}
                             title={!submitPermission.allowed ? submitPermission.reason : ''}
                             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors min-h-[40px] cursor-pointer shadow-xs"
@@ -1424,8 +1641,6 @@ export const AcceptedHandoffPage: React.FC = () => {
                                 ? 'Close Submission'
                                 : isRevision
                                 ? 'Submit Revised Work'
-                                : isInReview
-                                ? 'Update Deliverable'
                                 : 'Submit Deliverable'}
                             </span>
                           </button>
@@ -1467,17 +1682,21 @@ export const AcceptedHandoffPage: React.FC = () => {
                           </button>
                         )}
 
-                        {/* Review History Toggle */}
-                        {milestone.reviewHistory && milestone.reviewHistory.length > 0 && (
+                        {/* Versioned History Toggle */}
+                        {((milestone.submissions && milestone.submissions.length > 0) ||
+                          (milestone.reviewRecords && milestone.reviewRecords.length > 0) ||
+                          (milestone.reviewHistory && milestone.reviewHistory.length > 0)) && (
                           <button
                             type="button"
                             onClick={() =>
                               setExpandedHistoryMilestoneId(isHistoryExpanded ? null : milestone.id)
                             }
-                            className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-50 transition-colors min-h-[40px]"
+                            className="inline-flex items-center gap-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors min-h-[40px] cursor-pointer"
                           >
                             <History className="w-3.5 h-3.5 text-slate-400" />
-                            <span>History ({milestone.reviewHistory.length})</span>
+                            <span>
+                              History ({milestone.submissions?.length || milestone.reviewHistory?.length || 0})
+                            </span>
                             {isHistoryExpanded ? (
                               <ChevronUp className="w-3.5 h-3.5" />
                             ) : (
@@ -1488,36 +1707,75 @@ export const AcceptedHandoffPage: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Preceding milestone locked message */}
-                    {isTalent && !submitPermission.allowed && !isApproved && (
+                    {/* Preceding milestone locked or funding required message */}
+                    {isTalent && isReadyToStart && !startPermission.allowed && !isApproved && (
+                      <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 dark:bg-slate-950/40 p-2.5 rounded-xl border border-slate-200 dark:border-slate-800">
+                        <Lock className="w-3.5 h-3.5 shrink-0 text-amber-500" />
+                        <span>{startPermission.reason}</span>
+                      </div>
+                    )}
+
+                    {isTalent && !isReadyToStart && !submitPermission.allowed && !isApproved && !isInReview && (
                       <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-50 dark:bg-slate-950/40 p-2.5 rounded-xl border border-slate-100 dark:border-slate-800">
                         <Lock className="w-3.5 h-3.5 shrink-0" />
                         <span>{submitPermission.reason}</span>
                       </div>
                     )}
 
-                    {/* Deliverable Details Display if Submitted */}
-                    {milestone.submission && (
-                      <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-100 dark:border-slate-800 space-y-3 text-xs">
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/60 dark:border-slate-800/60 pb-2">
+                    {/* Review Deadline Banner when under review */}
+                    {isInReview && milestone.reviewDeadlineAt && (
+                      <div
+                        className={`flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs p-3 rounded-xl border ${
+                          deadlineInfo.isOverdue
+                            ? 'text-amber-900 dark:text-amber-200 bg-amber-50/80 dark:bg-amber-950/50 border-amber-300 dark:border-amber-800/80'
+                            : 'text-indigo-700 dark:text-indigo-300 bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-200/80 dark:border-indigo-800/60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Clock
+                            className={`w-4 h-4 shrink-0 ${
+                              deadlineInfo.isOverdue ? 'text-amber-600' : 'text-indigo-600 dark:text-indigo-400'
+                            }`}
+                          />
+                          <span>
+                            <strong>{deadlineInfo.isOverdue ? 'Review Overdue:' : 'Client Review Window:'}</strong>{' '}
+                            {deadlineInfo.displayText} (Review deadline: {new Date(milestone.reviewDeadlineAt).toLocaleDateString()})
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-semibold">
+                          Funds remain held in escrow (no automatic release)
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Latest Deliverable Package Details Display */}
+                    {latestSubmission && (
+                      <div className="p-4 sm:p-5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800 space-y-3 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/60 dark:border-slate-800/60 pb-2.5">
                           <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-                            <FileCheck2 className="w-3.5 h-3.5 text-indigo-600" />
-                            Deliverable Submission
+                            <FileCheck2 className="w-4 h-4 text-indigo-600" />
+                            <span>Current Deliverable Package</span>
+                            {'versionNumber' in latestSubmission && latestSubmission.versionNumber && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                                Version {latestSubmission.versionNumber}
+                              </span>
+                            )}
                           </span>
                           <span className="text-[11px] text-slate-400">
-                            Submitted {new Date(milestone.submission.submittedAt).toLocaleString()}
+                            Submitted {new Date(latestSubmission.submittedAt).toLocaleString()}
+                            {'submittedByName' in latestSubmission && latestSubmission.submittedByName && ` by ${latestSubmission.submittedByName}`}
                           </span>
                         </div>
 
                         <p className="text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
-                          {milestone.submission.deliveryNote}
+                          {latestSubmission.deliveryNote}
                         </p>
 
                         {/* Artifact & Live Links */}
                         <div className="flex flex-wrap items-center gap-2 pt-1">
-                          {milestone.submission.demoUrl && (
+                          {latestSubmission.demoUrl && (
                             <a
-                              href={milestone.submission.demoUrl}
+                              href={latestSubmission.demoUrl}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/50 hover:underline font-semibold"
@@ -1528,9 +1786,9 @@ export const AcceptedHandoffPage: React.FC = () => {
                             </a>
                           )}
 
-                          {milestone.submission.repoUrl && (
+                          {latestSubmission.repoUrl && (
                             <a
-                              href={milestone.submission.repoUrl}
+                              href={latestSubmission.repoUrl}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:underline font-semibold"
@@ -1541,9 +1799,9 @@ export const AcceptedHandoffPage: React.FC = () => {
                             </a>
                           )}
 
-                          {milestone.submission.figmaUrl && (
+                          {latestSubmission.figmaUrl && (
                             <a
-                              href={milestone.submission.figmaUrl}
+                              href={latestSubmission.figmaUrl}
                               target="_blank"
                               rel="noreferrer"
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800/50 hover:underline font-semibold"
@@ -1554,18 +1812,34 @@ export const AcceptedHandoffPage: React.FC = () => {
                             </a>
                           )}
 
-                          {milestone.submission.links?.map((link, lIdx) => (
-                            <a
-                              key={lIdx}
-                              href={link}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:underline text-[11px]"
-                            >
-                              <span>Link {lIdx + 1}</span>
-                              <ExternalLink className="w-2.5 h-2.5" />
-                            </a>
-                          ))}
+                          {('additionalLinks' in latestSubmission ? latestSubmission.additionalLinks : (latestSubmission as any).links)?.map(
+                            (link: string, lIdx: number) => (
+                              <a
+                                key={lIdx}
+                                href={link}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:underline text-[11px]"
+                              >
+                                <span>Doc {lIdx + 1}</span>
+                                <ExternalLink className="w-2.5 h-2.5" />
+                              </a>
+                            )
+                          )}
+
+                          {'evidenceFiles' in latestSubmission &&
+                            latestSubmission.evidenceFiles?.map((fileUrl: string, eIdx: number) => (
+                              <a
+                                key={eIdx}
+                                href={fileUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/50 hover:underline text-[11px] font-semibold"
+                              >
+                                <span>Evidence {eIdx + 1}</span>
+                                <ExternalLink className="w-2.5 h-2.5" />
+                              </a>
+                            ))}
                         </div>
                       </div>
                     )}
@@ -1584,17 +1858,34 @@ export const AcceptedHandoffPage: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Approved Confirmation Note */}
+                    {/* Approved Confirmation Note & Financials CTA */}
                     {isApproved && (
-                      <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40 text-xs">
-                        <span className="font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
-                          <Check className="w-3.5 h-3.5 text-emerald-600" />
-                          Deliverables verified and accepted by Client.
-                        </span>
-                        {milestone.approvedAt && (
-                          <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
-                            {new Date(milestone.approvedAt).toLocaleDateString()}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-emerald-50/50 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40 text-xs">
+                        <div className="space-y-0.5">
+                          <span className="font-semibold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            Deliverables verified and accepted by Client.
                           </span>
+                          {milestone.approvedAt && (
+                            <span className="text-[11px] text-emerald-600 dark:text-emerald-400 block">
+                              Approved {new Date(milestone.approvedAt).toLocaleDateString()}
+                              {milestone.approvedVersion ? ` (Version ${milestone.approvedVersion})` : ''}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Discoverability CTA to Financials tab if escrow is still held */}
+                        {isManager && milestone.paymentState === 'held' && (
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab('financials')}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors shrink-0 shadow-xs cursor-pointer min-h-[36px]"
+                            title="Navigate to Financials tab to authorize escrow release"
+                          >
+                            <DollarSign className="w-3.5 h-3.5" />
+                            <span>Go to Financials to Release</span>
+                            <ArrowRight className="w-3 h-3" />
+                          </button>
                         )}
                       </div>
                     )}
@@ -1602,21 +1893,56 @@ export const AcceptedHandoffPage: React.FC = () => {
                     {/* Interactive Talent Submission Form */}
                     {isSubmittingThis && isTalent && (
                       <div className="p-5 rounded-2xl bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40 space-y-4 animate-in fade-in duration-200">
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Submit Deliverable Package for "{milestone.title}"</span>
-                        </h4>
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-900 dark:text-indigo-300 flex items-center gap-1.5">
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Submit Deliverable Package for "{milestone.title}"</span>
+                          </h4>
+                          <span className="text-[11px] text-indigo-600 dark:text-indigo-400 font-semibold">
+                            {isRevision ? `Resubmission (Version ${(milestone.submissions?.length || 0) + 1})` : 'Version 1'}
+                          </span>
+                        </div>
+
+                        {/* Validation Error Banner */}
+                        {Object.keys(formValidationErrors).length > 0 && (
+                          <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/50 text-xs text-rose-700 dark:text-rose-300 space-y-1">
+                            <div className="font-bold flex items-center gap-1.5">
+                              <AlertCircle className="w-3.5 h-3.5" />
+                              <span>Please correct the following before submitting:</span>
+                            </div>
+                            <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                              {Object.entries(formValidationErrors).map(([k, err]) => (
+                                <li key={k}>{err}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
 
                         <div className="space-y-3 text-xs">
                           <div>
-                            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                              Work Summary & Delivery Notes *
-                            </label>
+                            <div className="flex justify-between items-center mb-1">
+                              <label className="font-semibold text-slate-700 dark:text-slate-300">
+                                Work Summary & Delivery Notes *
+                              </label>
+                              <span className={`text-[11px] ${deliveryNotes.length < 15 ? 'text-amber-600' : 'text-slate-400'}`}>
+                                {deliveryNotes.length}/5,000 chars {deliveryNotes.length < 15 && '(min 15 required)'}
+                              </span>
+                            </div>
                             <textarea
                               rows={3}
                               required
+                              maxLength={5000}
                               value={deliveryNotes}
-                              onChange={(e) => setDeliveryNotes(e.target.value)}
+                              onChange={(e) => {
+                                setDeliveryNotes(e.target.value);
+                                if (formValidationErrors.deliveryNotes) {
+                                  setFormValidationErrors((prev) => {
+                                    const next = { ...prev };
+                                    delete next.deliveryNotes;
+                                    return next;
+                                  });
+                                }
+                              }}
                               placeholder="Detail the completed features, bug fixes, test steps, or design deliverables submitted for review."
                               className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
                             />
@@ -1629,6 +1955,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                               </label>
                               <input
                                 type="url"
+                                maxLength={1000}
                                 value={demoUrl}
                                 onChange={(e) => setDemoUrl(e.target.value)}
                                 placeholder="https://demo.myapp.com"
@@ -1642,6 +1969,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                               </label>
                               <input
                                 type="url"
+                                maxLength={1000}
                                 value={repoUrl}
                                 onChange={(e) => setRepoUrl(e.target.value)}
                                 placeholder="https://github.com/org/repo"
@@ -1655,32 +1983,119 @@ export const AcceptedHandoffPage: React.FC = () => {
                               </label>
                               <input
                                 type="url"
+                                maxLength={1000}
                                 value={figmaUrl}
                                 onChange={(e) => setFigmaUrl(e.target.value)}
                                 placeholder="https://figma.com/file/..."
                                 className="w-full px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
                               />
                             </div>
+                          </div>
 
-                            <div>
-                              <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                                Additional Documentation Link
+                          {/* Multiple Additional Documentation Links (up to 10) */}
+                          <div className="space-y-2 pt-2 border-t border-indigo-100 dark:border-indigo-900/40">
+                            <div className="flex items-center justify-between">
+                              <label className="font-semibold text-slate-700 dark:text-slate-300">
+                                Additional Documentation Links ({additionalLinks.length}/10)
                               </label>
-                              <input
-                                type="url"
-                                value={additionalLink}
-                                onChange={(e) => setAdditionalLink(e.target.value)}
-                                placeholder="https://docs.google.com/..."
-                                className="w-full px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                              />
+                              {additionalLinks.length < 10 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setAdditionalLinks((prev) => [...prev, ''])}
+                                  className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Add Link</span>
+                                </button>
+                              )}
                             </div>
+                            {additionalLinks.map((link, lIdx) => (
+                              <div key={lIdx} className="flex items-center gap-2">
+                                <input
+                                  type="url"
+                                  maxLength={1000}
+                                  value={link}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setAdditionalLinks((prev) => {
+                                      const next = [...prev];
+                                      next[lIdx] = val;
+                                      return next;
+                                    });
+                                  }}
+                                  placeholder={`https://docs.google.com/... (Link #${lIdx + 1})`}
+                                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setAdditionalLinks((prev) => prev.filter((_, i) => i !== lIdx))
+                                  }
+                                  className="p-2 text-slate-400 hover:text-rose-600 transition-colors"
+                                  title="Remove link"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Multiple Evidence Files / Artifacts (up to 10) */}
+                          <div className="space-y-2 pt-2 border-t border-indigo-100 dark:border-indigo-900/40">
+                            <div className="flex items-center justify-between">
+                              <label className="font-semibold text-slate-700 dark:text-slate-300">
+                                Verification Artifacts / Evidence Links ({evidenceFiles.length}/10)
+                              </label>
+                              {evidenceFiles.length < 10 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setEvidenceFiles((prev) => [...prev, ''])}
+                                  className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                  <span>Add Evidence Link</span>
+                                </button>
+                              )}
+                            </div>
+                            {evidenceFiles.map((fileUrl, eIdx) => (
+                              <div key={eIdx} className="flex items-center gap-2">
+                                <input
+                                  type="url"
+                                  maxLength={1000}
+                                  value={fileUrl}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setEvidenceFiles((prev) => {
+                                      const next = [...prev];
+                                      next[eIdx] = val;
+                                      return next;
+                                    });
+                                  }}
+                                  placeholder={`https://drive.google.com/... (Evidence #${eIdx + 1})`}
+                                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setEvidenceFiles((prev) => prev.filter((_, i) => i !== eIdx))
+                                  }
+                                  className="p-2 text-slate-400 hover:text-rose-600 transition-colors"
+                                  title="Remove evidence"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ))}
                           </div>
                         </div>
 
                         <div className="flex items-center justify-end gap-2 pt-2 border-t border-indigo-100 dark:border-indigo-900/40">
                           <button
                             type="button"
-                            onClick={() => setSubmittingMilestoneId(null)}
+                            onClick={() => {
+                              setSubmittingMilestoneId(null);
+                              setFormValidationErrors({});
+                            }}
                             className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors min-h-[40px]"
                           >
                             Cancel
@@ -1700,18 +2115,31 @@ export const AcceptedHandoffPage: React.FC = () => {
                     {/* Interactive Client Review Module */}
                     {isReviewingThis && isManager && (
                       <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 space-y-4 animate-in fade-in duration-200">
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-1.5">
-                          <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>Client Deliverable Review Decision</span>
-                        </h4>
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-1.5">
+                            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>
+                              Client Deliverable Review Decision — Version {latestSubmission && 'versionNumber' in latestSubmission ? latestSubmission.versionNumber : 1}
+                            </span>
+                          </h4>
+                          <span className="text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                            Evaluating Latest Deliverable
+                          </span>
+                        </div>
 
                         <div className="space-y-3 text-xs">
                           <div>
-                            <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                              Revision Feedback (Required if requesting adjustments)
-                            </label>
+                            <div className="flex justify-between items-center mb-1">
+                              <label className="font-semibold text-slate-700 dark:text-slate-300">
+                                Revision Feedback (Required if requesting adjustments)
+                              </label>
+                              <span className="text-[11px] text-slate-400">
+                                {revisionFeedback.length}/2,000 chars
+                              </span>
+                            </div>
                             <textarea
                               rows={3}
+                              maxLength={2000}
                               value={revisionFeedback}
                               onChange={(e) => setRevisionFeedback(e.target.value)}
                               placeholder="Provide clear, actionable feedback specifying what adjustments are needed before sign-off."
@@ -1720,14 +2148,18 @@ export const AcceptedHandoffPage: React.FC = () => {
                             <span className="text-[11px] text-slate-400 block mt-1">
                               Note: Scope includes {contract?.scopeLock.revisionAllowance || 2} revision rounds per milestone. Current round: {milestone.revisionCount || 0}.
                             </span>
+                            <div className="mt-2.5 p-2.5 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/50 text-[11px] text-indigo-700 dark:text-indigo-300">
+                              <strong>Payment Separation Notice:</strong> Approving deliverables confirms work satisfaction. Escrow funds remain held until explicitly released via separate authorization in the Financials tab.
+                            </div>
                           </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+                        {/* Mobile-Safe Action Buttons: Stack cleanly on narrow viewports */}
+                        <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
                           <button
                             type="button"
                             onClick={() => setReviewingMilestoneId(null)}
-                            className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors min-h-[40px]"
+                            className="w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors min-h-[40px]"
                           >
                             Cancel
                           </button>
@@ -1735,8 +2167,20 @@ export const AcceptedHandoffPage: React.FC = () => {
                           <button
                             type="button"
                             disabled={isReviewingWork}
+                            onClick={() => {
+                              setDisputeModalMilestone(milestone);
+                              setDisputeFeedback(revisionFeedback.trim());
+                            }}
+                            className="w-full sm:w-auto px-3.5 py-2 rounded-xl text-xs font-bold text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 border border-rose-200 dark:border-rose-800 disabled:opacity-50 transition-colors min-h-[40px] cursor-pointer"
+                          >
+                            Raise Dispute
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={isReviewingWork}
                             onClick={() => handleReviewDeliverable(milestone.id, 'revision_requested')}
-                            className="px-4 py-2 rounded-xl text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 border border-amber-200 dark:border-amber-800 disabled:opacity-50 transition-colors min-h-[40px] cursor-pointer"
+                            className="w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 border border-amber-200 dark:border-amber-800 disabled:opacity-50 transition-colors min-h-[40px] cursor-pointer"
                           >
                             {isReviewingWork ? 'Saving...' : 'Request Revision'}
                           </button>
@@ -1745,7 +2189,7 @@ export const AcceptedHandoffPage: React.FC = () => {
                             type="button"
                             disabled={isReviewingWork}
                             onClick={() => handleReviewDeliverable(milestone.id, 'approved')}
-                            className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition-colors min-h-[40px] shadow-xs cursor-pointer"
+                            className="w-full sm:w-auto px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 transition-colors min-h-[40px] shadow-xs cursor-pointer"
                           >
                             {isReviewingWork ? 'Approving...' : 'Approve Milestone'}
                           </button>
@@ -1753,41 +2197,236 @@ export const AcceptedHandoffPage: React.FC = () => {
                       </div>
                     )}
 
-                    {/* Expandable Review & Revision History Timeline */}
-                    {isHistoryExpanded && milestone.reviewHistory && milestone.reviewHistory.length > 0 && (
-                      <div className="p-4 rounded-xl bg-slate-100/70 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 space-y-3 text-xs animate-in fade-in duration-150">
-                        <h5 className="font-bold text-slate-800 dark:text-slate-200">
-                          Audit History ({milestone.reviewHistory.length} review cycles)
-                        </h5>
-                        <div className="space-y-2.5">
-                          {milestone.reviewHistory.map((entry, hIdx) => (
-                            <div
-                              key={hIdx}
-                              className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 space-y-1"
-                            >
-                              <div className="flex items-center justify-between">
-                                <span
-                                  className={`font-bold capitalize ${
-                                    entry.decision === 'approved'
-                                      ? 'text-emerald-600'
-                                      : 'text-amber-600'
+                    {/* Expandable Versioned Deliverables & Review History Timeline */}
+                    {isHistoryExpanded && (
+                      <div className="p-4 sm:p-5 rounded-2xl bg-slate-100/70 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-4 text-xs animate-in fade-in duration-150">
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+                          <h5 className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                            <History className="w-4 h-4 text-indigo-600" />
+                            <span>Versioned Deliverables & Review Audit Trail</span>
+                          </h5>
+                          <span className="text-[11px] text-slate-500">
+                            {milestone.submissions?.length || 0} version(s) recorded
+                          </span>
+                        </div>
+
+                        {/* Render each Submission Version */}
+                        {milestone.submissions && milestone.submissions.length > 0 ? (
+                          <div className="space-y-4">
+                            {milestone.submissions.map((sub, sIdx) => {
+                              const isLatestVersion = sIdx === milestone.submissions!.length - 1;
+                              const isApprovedVersion = milestone.approvedVersion === sub.versionNumber;
+                              const matchingReviewRecord = milestone.reviewRecords?.find(
+                                (r) => r.versionEvaluated === sub.versionNumber
+                              );
+                              const matchingLegacyReview = !matchingReviewRecord && milestone.reviewHistory
+                                ? milestone.reviewHistory[sIdx]
+                                : undefined;
+
+                              return (
+                                <div
+                                  key={sub.versionNumber}
+                                  className={`p-4 rounded-xl border space-y-3 ${
+                                    isApprovedVersion
+                                      ? 'bg-emerald-50/40 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800'
+                                      : isLatestVersion
+                                      ? 'bg-white dark:bg-slate-900 border-indigo-200 dark:border-indigo-800 shadow-xs'
+                                      : 'bg-white/80 dark:bg-slate-900/80 border-slate-200 dark:border-slate-800'
                                   }`}
                                 >
-                                  {entry.decision.replace('_', ' ')}
-                                </span>
-                                <span className="text-[11px] text-slate-400">
-                                  {new Date(entry.reviewedAt).toLocaleString()}
-                                </span>
+                                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-bold text-sm text-slate-900 dark:text-white">
+                                        Version {sub.versionNumber}
+                                      </span>
+                                      {isLatestVersion && (
+                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                                          Current Submission
+                                        </span>
+                                      )}
+                                      {isApprovedVersion && (
+                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 flex items-center gap-1">
+                                          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                          Approved Deliverable
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[11px] text-slate-400 flex items-center gap-1">
+                                      <span>Submitted {new Date(sub.submittedAt).toLocaleString()}</span>
+                                      <span>by {sub.submittedByName || 'Partner'}</span>
+                                    </div>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                      {sub.deliveryNote}
+                                    </p>
+                                  </div>
+
+                                  {/* Version Artifact Links */}
+                                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                                    {sub.demoUrl && (
+                                      <a
+                                        href={sub.demoUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/50 hover:underline text-[11px] font-semibold"
+                                      >
+                                        <Globe className="w-3 h-3" />
+                                        <span>Demo</span>
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                    )}
+                                    {sub.repoUrl && (
+                                      <a
+                                        href={sub.repoUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:underline text-[11px] font-semibold"
+                                      >
+                                        <Github className="w-3 h-3" />
+                                        <span>Repo</span>
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                    )}
+                                    {sub.figmaUrl && (
+                                      <a
+                                        href={sub.figmaUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800/50 hover:underline text-[11px] font-semibold"
+                                      >
+                                        <Figma className="w-3 h-3" />
+                                        <span>Figma</span>
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                    )}
+                                    {sub.additionalLinks?.map((lnk, lIdx) => (
+                                      <a
+                                        key={lIdx}
+                                        href={lnk}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:underline text-[11px]"
+                                      >
+                                        <span>Doc {lIdx + 1}</span>
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                    ))}
+                                    {sub.evidenceFiles?.map((ev, eIdx) => (
+                                      <a
+                                        key={eIdx}
+                                        href={ev}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/50 hover:underline text-[11px] font-semibold"
+                                      >
+                                        <span>Evidence {eIdx + 1}</span>
+                                        <ExternalLink className="w-2.5 h-2.5" />
+                                      </a>
+                                    ))}
+                                  </div>
+
+                                  {/* Review Evaluation for this specific version */}
+                                  {matchingReviewRecord && (
+                                    <div
+                                      className={`p-3 rounded-xl border space-y-1 text-xs ${
+                                        matchingReviewRecord.decision === 'approved'
+                                          ? 'bg-emerald-50/70 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60'
+                                          : matchingReviewRecord.decision === 'disputed'
+                                          ? 'bg-rose-50/70 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60'
+                                          : 'bg-amber-50/70 dark:bg-amber-950/40 border-amber-200 dark:border-amber-800/60'
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between">
+                                        <span
+                                          className={`font-bold capitalize flex items-center gap-1 ${
+                                            matchingReviewRecord.decision === 'approved'
+                                              ? 'text-emerald-700 dark:text-emerald-300'
+                                              : matchingReviewRecord.decision === 'disputed'
+                                              ? 'text-rose-700 dark:text-rose-300'
+                                              : 'text-amber-700 dark:text-amber-300'
+                                          }`}
+                                        >
+                                          {matchingReviewRecord.decision === 'approved' && (
+                                            <CheckCircle2 className="w-3.5 h-3.5" />
+                                          )}
+                                          {matchingReviewRecord.decision === 'revision_requested' && (
+                                            <AlertTriangle className="w-3.5 h-3.5" />
+                                          )}
+                                          {matchingReviewRecord.decision === 'disputed' && (
+                                            <AlertCircle className="w-3.5 h-3.5" />
+                                          )}
+                                          <span>
+                                            Client Evaluation: {matchingReviewRecord.decision.replace('_', ' ')}
+                                          </span>
+                                        </span>
+                                        <span className="text-[11px] text-slate-400">
+                                          {new Date(matchingReviewRecord.reviewedAt).toLocaleString()}
+                                        </span>
+                                      </div>
+                                      <p className="italic text-slate-700 dark:text-slate-300">
+                                        "{matchingReviewRecord.feedback}"
+                                      </p>
+                                      <div className="text-[10px] text-slate-400">
+                                        Evaluated by {matchingReviewRecord.reviewerName}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {!matchingReviewRecord && matchingLegacyReview && (
+                                    <div className="p-3 rounded-xl border bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 space-y-1 text-xs">
+                                      <div className="flex items-center justify-between">
+                                        <span className="font-bold capitalize text-slate-700 dark:text-slate-300">
+                                          Review Decision: {matchingLegacyReview.decision.replace('_', ' ')}
+                                        </span>
+                                        <span className="text-[11px] text-slate-400">
+                                          {new Date(matchingLegacyReview.reviewedAt).toLocaleString()}
+                                        </span>
+                                      </div>
+                                      <p className="italic text-slate-600 dark:text-slate-400">
+                                        "{matchingLegacyReview.feedback}"
+                                      </p>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : milestone.reviewHistory && milestone.reviewHistory.length > 0 ? (
+                          /* Fallback for legacy milestones with only reviewHistory */
+                          <div className="space-y-2.5">
+                            {milestone.reviewHistory.map((entry, hIdx) => (
+                              <div
+                                key={hIdx}
+                                className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 space-y-1"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <span
+                                    className={`font-bold capitalize ${
+                                      entry.decision === 'approved'
+                                        ? 'text-emerald-600'
+                                        : 'text-amber-600'
+                                    }`}
+                                  >
+                                    {entry.decision.replace('_', ' ')}
+                                  </span>
+                                  <span className="text-[11px] text-slate-400">
+                                    {new Date(entry.reviewedAt).toLocaleString()}
+                                  </span>
+                                </div>
+                                <p className="text-slate-600 dark:text-slate-400 italic">
+                                  "{entry.feedback || 'No comments left.'}"
+                                </p>
+                                <div className="text-[10px] text-slate-400">
+                                  Reviewed by: {entry.reviewerName || entry.reviewedBy}
+                                </div>
                               </div>
-                              <p className="text-slate-600 dark:text-slate-400 italic">
-                                "{entry.feedback || 'No comments left.'}"
-                              </p>
-                              <div className="text-[10px] text-slate-400">
-                                Reviewed by: {entry.reviewerName || entry.reviewedBy}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-500">No previous submission history recorded.</p>
+                        )}
                       </div>
                     )}
                   </div>

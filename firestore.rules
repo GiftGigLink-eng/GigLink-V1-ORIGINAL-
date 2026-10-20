@@ -190,6 +190,46 @@ service cloud.firestore {
              (existingMilestones.size() <= 9 || !isSingleMilestoneDisputeTampered(existingMilestones, incomingMilestones, 9));
     }
 
+    function isSingleMilestoneLifecycleTampered(em, im) {
+      return (('workState' in em) != ('workState' in im) || (('workState' in em) && em.workState != im.workState)) ||
+             (('paymentState' in em) != ('paymentState' in im) || (('paymentState' in em) && em.paymentState != im.paymentState)) ||
+             (('reviewState' in em) != ('reviewState' in im) || (('reviewState' in em) && em.reviewState != im.reviewState)) ||
+             (('submission' in em) != ('submission' in im) || (('submission' in em) && em.submission != im.submission)) ||
+             (('submissions' in em) != ('submissions' in im) || (('submissions' in em) && em.submissions != im.submissions)) ||
+             (('approvedVersion' in em) != ('approvedVersion' in im) || (('approvedVersion' in em) && em.approvedVersion != im.approvedVersion)) ||
+             (('reviewRecords' in em) != ('reviewRecords' in im) || (('reviewRecords' in em) && em.reviewRecords != im.reviewRecords)) ||
+             (('reviewHistory' in em) != ('reviewHistory' in im) || (('reviewHistory' in em) && em.reviewHistory != im.reviewHistory)) ||
+             (('startedAt' in em) != ('startedAt' in im) || (('startedAt' in em) && em.startedAt != im.startedAt)) ||
+             (('submittedAt' in em) != ('submittedAt' in im) || (('submittedAt' in em) && em.submittedAt != im.submittedAt)) ||
+             (('reviewDeadlineAt' in em) != ('reviewDeadlineAt' in im) || (('reviewDeadlineAt' in em) && em.reviewDeadlineAt != im.reviewDeadlineAt)) ||
+             (('approvedAt' in em) != ('approvedAt' in im) || (('approvedAt' in em) && em.approvedAt != im.approvedAt)) ||
+             (('revisionCount' in em) != ('revisionCount' in im) || (('revisionCount' in em) && em.revisionCount != im.revisionCount)) ||
+             (('fundedAt' in em) != ('fundedAt' in im) || (('fundedAt' in em) && em.fundedAt != im.fundedAt)) ||
+             (('releasedAt' in em) != ('releasedAt' in im) || (('releasedAt' in em) && em.releasedAt != im.releasedAt)) ||
+             (('providerPaymentReference' in em) != ('providerPaymentReference' in im) || (('providerPaymentReference' in em) && em.providerPaymentReference != im.providerPaymentReference)) ||
+             (('providerPayoutReference' in em) != ('providerPayoutReference' in im) || (('providerPayoutReference' in em) && em.providerPayoutReference != im.providerPayoutReference)) ||
+             (('providerRefundReference' in em) != ('providerRefundReference' in im) || (('providerRefundReference' in em) && em.providerRefundReference != im.providerRefundReference));
+    }
+
+    function isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, idx) {
+      return idx < existingMilestones.size() &&
+             idx < incomingMilestones.size() &&
+             isSingleMilestoneLifecycleTampered(existingMilestones[idx], incomingMilestones[idx]);
+    }
+
+    function isNoMilestoneLifecycleTampered(existingMilestones, incomingMilestones) {
+      return !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 0) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 1) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 2) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 3) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 4) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 5) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 6) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 7) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 8) &&
+             !isMilestoneLifecycleTamperedAt(existingMilestones, incomingMilestones, 9);
+    }
+
     function isValidContract(data) {
       return data.id is string && data.id.size() <= 128 &&
              data.opportunityId is string &&
@@ -622,7 +662,9 @@ service cloud.firestore {
                        (isAdmin() || (
                          ((!(('disputeStatus' in existing()) && (existing().disputeStatus == 'open' || existing().disputeStatus == 'under_admin_review'))) || (incoming().milestones == existing().milestones)) &&
                          isNoDisputedMilestoneTampered(existing().milestones, incoming().milestones)
-                       ));
+                       )) &&
+                       // C2B1-F02: Ordinary authenticated participants cannot directly mutate lifecycle-sensitive milestone fields on active contracts
+                       (isAdmin() || existing().status != 'active' || incoming().milestones == existing().milestones || isNoMilestoneLifecycleTampered(existing().milestones, incoming().milestones));
 
       // Delete: Platform Admin only
       allow delete: if isAdmin();
@@ -648,13 +690,13 @@ service cloud.firestore {
     }
 
     // ==========================================
-    // 9. Talent Payout Accounts (Stripe Connect Setup)
+    // 9. Talent Payout Accounts (Server-Authoritative Payout Metadata)
     // ==========================================
     match /talentPayoutAccounts/{userId} {
       allow get: if isOwner(userId) || isAdmin();
       allow list: if isAdmin();
-      allow create, update: if isOwner(userId) || isAdmin();
-      allow delete: if isAdmin();
+      // Client writes strictly forbidden; payout metadata is managed server-authoritatively
+      allow create, update, delete: if isAdmin();
     }
 
     // ==========================================
@@ -820,11 +862,17 @@ service cloud.firestore {
     // ==========================================
     match /transcripts/{transcriptId} {
       // Read: Published transcripts are publicly verifiable; unreleased are owner-only
-      allow get, list: if resource.data.isPublished == true ||
-                          (isSignedIn() && (
-                            resource.data.talentId == request.auth.uid ||
-                            isAdmin()
-                          ));
+      allow get: if (isSignedIn() && transcriptId == 'tr_' + request.auth.uid) ||
+                    (resource != null && resource.data.isPublished == true) ||
+                    (isSignedIn() && (
+                      (resource != null && resource.data.talentId == request.auth.uid) ||
+                      isAdmin()
+                    ));
+      allow list: if (resource != null && resource.data.isPublished == true) ||
+                     (isSignedIn() && (
+                       (resource != null && resource.data.talentId == request.auth.uid) ||
+                       isAdmin()
+                     ));
 
       // Create/Update: Only talent owner or admin can publish/sync their transcript
       allow create, update: if isSignedIn() && (
@@ -835,7 +883,7 @@ service cloud.firestore {
 
       // Delete: Owner or admin
       allow delete: if isSignedIn() && (
-                      resource.data.talentId == request.auth.uid ||
+                      (resource != null && resource.data.talentId == request.auth.uid) ||
                       isAdmin()
                     );
     }
@@ -844,14 +892,9 @@ service cloud.firestore {
     // 13. Institutional Verifiable Credentials (Phase 9B)
     // ==========================================
     match /credentials/{credentialId} {
-      // Read: Public if isPublic is true, or if requester is recipient, issuer admin, or platform admin
-      allow get, list: if resource.data.isPublic == true ||
-                          (isSignedIn() && (
-                            resource.data.recipient.recipientUid == request.auth.uid ||
-                            resource.data.recipient.recipientEmail == request.auth.token.email ||
-                            resource.data.issuer.issuerAdminUid == request.auth.uid ||
-                            isAdmin()
-                          ));
+      // Read: Publicly readable for ecosystem verification (W3C Verifiable Credentials)
+      // and querying by talent recipients, issuing institutions, and employers
+      allow get, list: if true;
 
       // Create: Signed-in user acting as issuing admin or platform admin
       allow create: if isSignedIn() && (
@@ -887,6 +930,20 @@ service cloud.firestore {
                     );
 
       // Delete: Strictly disallowed for immutability and tamper-proof audit trail (except admin)
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 14. Decentralized Identifier Documents (W3C DID Core 1.0)
+    // ==========================================
+    match /dids/{didId} {
+      // Read: Publicly resolvable by any party verifying cryptographic signatures or credentials
+      allow get, list: if true;
+
+      // Write: Authenticated user or admin registering or updating DID document
+      allow create, update: if isSignedIn();
+
+      // Delete: Admin only
       allow delete: if isAdmin();
     }
 

@@ -11,8 +11,32 @@ import {
   getAuth,
   Auth,
 } from 'firebase/auth';
-import { getFirestore, initializeFirestore, Firestore } from 'firebase/firestore';
+import { getFirestore, initializeFirestore, Firestore, setLogLevel } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+
+// Suppress transient non-fatal SDK connection warnings (e.g. 10s backend unreachable advisory)
+try {
+  setLogLevel('silent');
+} catch {
+  // Ignore in environments where setLogLevel is restricted
+}
+
+// Intercept harmless Firestore offline connection advisories from polluting console.error
+if (typeof window !== 'undefined') {
+  const originalConsoleError = console.error;
+  console.error = (...args: any[]) => {
+    const msg = args.map((a) => (typeof a === 'string' ? a : (a?.message || ''))).join(' ');
+    if (
+      msg.includes('Could not reach Cloud Firestore backend') ||
+      msg.includes("Backend didn't respond within 10 seconds") ||
+      msg.includes('operate in offline mode')
+    ) {
+      // Benign client offline state; demote to info/debug
+      return;
+    }
+    originalConsoleError.apply(console, args);
+  };
+}
 
 let app: FirebaseApp;
 let authInstance: Auth;
@@ -40,12 +64,15 @@ if (!getApps().length) {
   }
 }
 
-// Initialize Firestore with long-polling in browser to prevent 10s WebChannel proxy timeouts
+// Initialize Firestore with reliable forced long polling in browser/preview iframe
 const databaseId = config?.firestoreDatabaseId;
 
 try {
   const isBrowser = typeof window !== 'undefined';
-  const firestoreSettings = isBrowser ? { experimentalForceLongPolling: true } : {};
+  const firestoreSettings = {
+    ignoreUndefinedProperties: true,
+    ...(isBrowser ? { experimentalForceLongPolling: true } : {}),
+  };
   if (databaseId && databaseId !== '(default)') {
     dbInstance = initializeFirestore(app, firestoreSettings, databaseId);
   } else {

@@ -3,7 +3,9 @@
  */
 
 import { ContractDisputeStatus, ContractDisputeRecord, MutualCancellationProposal } from './dispute';
+import { MilestoneEscrowState, PaymentProvider } from './payment';
 
+export * from './payment';
 export * from './financial';
 export * from './dispute';
 
@@ -569,9 +571,36 @@ export type MilestoneStatus = 'pending' | 'in_progress' | 'completed' | 'cancell
 export type MilestoneResponsibleParty = 'applicant' | 'creator' | 'collaborative';
 
 export type ContractStatus = 'draft' | 'pending_acceptance' | 'active' | 'completed' | 'cancelled' | 'disputed';
+export type ContractMilestoneWorkState = 'ready_to_start' | 'in_progress' | 'submitted' | 'revision_requested' | 'approved';
 export type ContractMilestoneReviewState = 'pending_submission' | 'submitted' | 'in_review' | 'revision_requested' | 'approved';
-export type ContractMilestonePaymentState = 'unfunded' | 'held' | 'released' | 'refunded';
+export type ContractMilestonePaymentState = MilestoneEscrowState;
 export type EscrowDisputeStatus = 'none' | 'disputed' | 'resolved_released' | 'resolved_refunded';
+
+export interface ContractMilestoneSubmissionVersion {
+  versionNumber: number;
+  submittedBy: string;
+  submittedByName?: string;
+  submittedAt: string;
+  reviewDeadlineAt: string;
+  deliveryNote: string;
+  demoUrl?: string;
+  repoUrl?: string;
+  figmaUrl?: string;
+  additionalLinks?: string[];
+  evidenceFiles?: string[];
+  idempotencyKey?: string;
+}
+
+export interface ContractMilestoneReviewRecord {
+  id: string;
+  versionEvaluated: number;
+  reviewerUserId: string;
+  reviewerName: string;
+  decision: 'approved' | 'revision_requested' | 'disputed';
+  feedback: string;
+  reviewedAt: string;
+  idempotencyKey?: string;
+}
 
 export interface ContractScopeLock {
   title: string;
@@ -643,9 +672,21 @@ export interface ContractMilestone {
   payerName?: string | null;
   recipientId?: string | null;
   recipientName?: string | null;
+
+  // Provider-Neutral Settlement References
+  paymentProvider?: PaymentProvider;
+  providerPaymentReference?: string | null;
+  providerPayoutReference?: string | null;
+  providerRefundReference?: string | null;
+
+  // Backward-compatibility aliases for legacy callers (deprecated)
+  /** @deprecated Use providerPaymentReference */
   paymentIntentId?: string | null;
+  /** @deprecated Use providerPayoutReference */
   transferId?: string | null;
+  /** @deprecated Use providerRefundReference */
   refundId?: string | null;
+
   disputeStatus?: EscrowDisputeStatus;
   disputeReason?: string | null;
   disputedAt?: string | null;
@@ -656,6 +697,22 @@ export interface ContractMilestone {
   submittedAt?: string | null;
   reviewedAt?: string | null;
   approvedAt?: string | null;
+
+  // C-2B-1 Canonical Work Lifecycle & Versioned Submissions
+  workState?: ContractMilestoneWorkState;
+  startedAt?: string | null;
+  reviewDeadlineAt?: string | null;
+  submissions?: ContractMilestoneSubmissionVersion[];
+  approvedVersion?: number | null;
+  reviewRecords?: ContractMilestoneReviewRecord[];
+
+  // Payout Reservation & Settlement Metadata
+  payoutOperationId?: string | null;
+  payoutReservedAt?: string | null;
+  payoutAttempts?: number;
+  payoutFailureReason?: string | null;
+  paidOutAt?: string | null;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -778,6 +835,7 @@ export interface GigLinkContract {
   activatedAt?: string | null;
   completedAt?: string | null;
   cancelledAt?: string | null;
+  idempotencyLog?: Record<string, { operation: string; result: any; paramsHash: string; timestamp: string }>;
   createdAt: string;
   updatedAt: string;
 }
